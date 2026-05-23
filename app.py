@@ -118,9 +118,10 @@ def _extract_rating_review_count(content):
     for pat in count_patterns:
         m = re.search(pat, content, re.IGNORECASE)
         if m:
-            review_count = m.group(1).replace(",", "")
+            raw_count = m.group(1).replace(",", "")
             try:
-                if int(review_count) > 0:
+                if int(raw_count) > 0:
+                    review_count = raw_count
                     break
             except ValueError:
                 review_count = None
@@ -525,9 +526,30 @@ class ScrapeWorker(QThread):
     def resume(self):
         self._pause = False
 
+    def _format_eta(self, elapsed, processed, total):
+        """Format a human-readable ETA string based on elapsed time and progress."""
+        remaining = total - processed
+        if processed == 0 or remaining <= 0:
+            return ""
+        avg_secs = elapsed / processed
+        eta_secs = avg_secs * remaining
+        if eta_secs < 60:
+            return f"~{int(eta_secs)}s remaining"
+        elif eta_secs < 3600:
+            mins = int(eta_secs // 60)
+            secs = int(eta_secs % 60)
+            if secs >= 30:
+                mins += 1
+            return f"~{mins}m remaining"
+        else:
+            hours = int(eta_secs // 3600)
+            mins = int((eta_secs % 3600) // 60)
+            return f"~{hours}h {mins}m remaining"
+
     def run(self):
         total = len(self.items)
         SAVE_INTERVAL = 50
+        start_time = time.time()
 
         # --- Initialise: fresh or from checkpoint ---
         if self.existing_results is not None and self.resume_output_path:
@@ -610,7 +632,10 @@ class ScrapeWorker(QThread):
         def emit_status(i, result):
             item = self.items[i]
             src = 'MMT' if (item.get('source') == 'mmt' or 'makemytrip' in item.get('url', '')) else 'Booking.com'
+            eta_str = self._format_eta(time.time() - start_time, processed_count[0], total)
             status = f"{item.get('name', '')[:35]} -> Rating: {result.get('rating', 'N/A') if result else 'N/A'}, Reviews: {result.get('review_count', 'N/A') if result else 'N/A'}"
+            if eta_str:
+                status += f" \u2022 {eta_str}"
             self.progress.emit(processed_count[0], total, status)
 
         # Separate remaining items into non-MMT (parallel) and MMT (sequential via shared browser)
@@ -625,6 +650,7 @@ class ScrapeWorker(QThread):
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
                 futures = {executor.submit(scrape_one, i, self.items[i]): i for i in non_mmt_indices}
                 pending = set(futures.keys())
+                pause_start = None
                 for future in as_completed(futures):
                     pending.discard(future)
                     if self._stop:
@@ -632,7 +658,12 @@ class ScrapeWorker(QThread):
                             f.cancel()
                         break
                     while self._pause and not self._stop:
+                        if pause_start is None:
+                            pause_start = time.time()
                         time.sleep(0.5)
+                    if pause_start is not None:
+                        start_time += time.time() - pause_start
+                        pause_start = None
                     if self._stop:
                         for f in pending:
                             f.cancel()
@@ -646,13 +677,19 @@ class ScrapeWorker(QThread):
 
         # Process MMT items sequentially (shared browser via lock)
         if mmt_indices and not self._stop:
+            pause_start = None
             for i in mmt_indices:
                 if self._stop:
                     break
                 while self._pause:
+                    if pause_start is None:
+                        pause_start = time.time()
                     time.sleep(0.5)
                     if self._stop:
                         break
+                if pause_start is not None:
+                    start_time += time.time() - pause_start
+                    pause_start = None
                 i, result = scrape_one(i, self.items[i])
                 results[i] = result
                 processed_count[0] += 1
@@ -934,9 +971,15 @@ class MainWindow(QMainWindow):
             # Find column indices
             def find_col(*names):
                 for n in names:
-                    for i, h in enumerate(lower_headers):
-                        if n in h:
-                            return i
+                    if len(n) <= 3:
+                        # Short patterns: word-boundary match only (avoids 'fh' matching 'Feedback_Header')
+                        for i, h in enumerate(lower_headers):
+                            if re.search(r'(?<![a-z])' + re.escape(n) + r'(?![a-z])', h):
+                                return i
+                    else:
+                        for i, h in enumerate(lower_headers):
+                            if n in h:
+                                return i
                 return None
 
             name_idx = find_col('name', 'hotel')

@@ -1,5 +1,5 @@
 """Test CSV column detection logic for all formats, matching app.py's exact parsing logic."""
-import csv, sys, os, io
+import csv, sys, os, io, re
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -48,9 +48,14 @@ for csv_name, exp_mmt, desc in test_cases:
 
     def find_col(*names):
         for n in names:
-            for i, h in enumerate(lower_headers):
-                if n in h:
-                    return i
+            if len(n) <= 3:
+                for i, h in enumerate(lower_headers):
+                    if re.search(r'(?<![a-z])' + re.escape(n) + r'(?![a-z])', h):
+                        return i
+            else:
+                for i, h in enumerate(lower_headers):
+                    if n in h:
+                        return i
         return None
 
     name_idx = find_col('name', 'hotel')
