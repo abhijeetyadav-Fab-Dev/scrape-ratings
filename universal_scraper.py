@@ -509,35 +509,72 @@ class BookingExtranetSource(ExtranetSource):
         if "/groups/home/" in current_url:
             # Let the DOM settle
             page.wait_for_timeout(2000)
-            properties = page.evaluate("""() => {
-                const props = [];
-                const hrefElements = document.querySelectorAll('a[href*="hotel_id="]');
-                for (const el of hrefElements) {
-                    const href = el.getAttribute('href') || '';
-                    const match = href.match(/hotel_id=(\d+)/);
-                    if (!match) continue;
-                    const hotelId = match[1];
-                    
-                    let hotelName = el.textContent.trim();
-                    if (hotelName.length < 4 || /manage|select|go|enter|edit/i.test(hotelName)) {
-                        const row = el.closest('tr') || el.closest('[class*="row"]') || el.closest('[class*="item"]');
-                        if (row) {
-                            const cells = row.querySelectorAll('td, div, span');
-                            for (const cell of cells) {
-                                const txt = cell.textContent.trim();
-                                if (txt.length >= 4 && !txt.includes('hotel_id') && !/manage|select|go|enter|edit/i.test(txt)) {
-                                    hotelName = txt;
-                                    break;
+            properties = []
+            
+            # Helper function to scan properties on the current Group page
+            def scan_current_page():
+                return page.evaluate("""() => {
+                    const props = [];
+                    const hrefElements = document.querySelectorAll('a[href*="hotel_id="]');
+                    for (const el of hrefElements) {
+                        const href = el.getAttribute('href') || '';
+                        const match = href.match(/hotel_id=(\d+)/);
+                        if (!match) continue;
+                        const hotelId = match[1];
+                        
+                        let hotelName = el.textContent.trim();
+                        if (hotelName.length < 4 || /manage|select|go|enter|edit/i.test(hotelName)) {
+                            const row = el.closest('tr') || el.closest('[class*="row"]') || el.closest('[class*="item"]');
+                            if (row) {
+                                const cells = row.querySelectorAll('td, div, span');
+                                for (const cell of cells) {
+                                    const txt = cell.textContent.trim();
+                                    if (txt.length >= 4 && !txt.includes('hotel_id') && !/manage|select|go|enter|edit/i.test(txt)) {
+                                        hotelName = txt;
+                                        break;
+                                    }
                                 }
                             }
                         }
+                        if (!props.some(p => p.id === hotelId)) {
+                            props.push({ id: hotelId, name: hotelName });
+                        }
                     }
-                    if (!props.some(p => p.id === hotelId)) {
-                        props.push({ id: hotelId, name: hotelName });
-                    }
-                }
-                return props;
-            }""")
+                    return props;
+                }""")
+
+            # Loop through paginated Group Homepage to collect all properties (up to 15 pages)
+            for page_num in range(1, 15):
+                current_props = scan_current_page()
+                for p in current_props:
+                    if not any(x["id"] == p["id"] for x in properties):
+                        properties.append(p)
+                
+                # Look for a visible pagination 'Next' link or button
+                next_btn = None
+                try:
+                    next_btn = page.query_selector(
+                        'a[class*="next"], button[class*="next"], [data-testid="pagination-next-button"], '
+                        '.bui-pagination__link[title*="Next"], .pagination__link--next'
+                    )
+                    if not next_btn:
+                        buttons = page.query_selector_all('a, button, span')
+                        for btn in buttons:
+                            if btn.is_visible() and re.search(r'^(next|>|»)$', btn.inner_text().strip().lower()):
+                                next_btn = btn
+                                break
+                except Exception:
+                    pass
+                
+                if next_btn:
+                    try:
+                        next_btn.click()
+                        page.wait_for_timeout(3000) # Wait for page load to settle
+                    except Exception:
+                        break
+                else:
+                    break
+
             self._properties = properties
         else:
             self._properties = []
@@ -1080,6 +1117,46 @@ class BookingExtranetSource(ExtranetSource):
         # ── Generic fallback (inherited from ExtranetSource) ─
         return self._generic_fallback(page)
 
+    def _extract_property_name_from_page(self, page) -> str:
+        """Extract the exact hotel/property name from the current extranet page."""
+        try:
+            # Settle DOM briefly
+            page.wait_for_timeout(1000)
+            
+            # Selector list representing common elements containing hotel/property name on Booking.com
+            selectors = [
+                "[class*='hotel-name']",
+                "[class*='property-name']",
+                "[data-name='hotel-name']",
+                "[data-name='property-name']",
+                "span[class*='bui-header__title']",
+                ".bui-header__title",
+                "h1[class*='name']",
+                "h1[class*='title']",
+                "div[class*='property-name']",
+                "[class*='header-title']",
+            ]
+            for sel in selectors:
+                try:
+                    el = page.query_selector(sel)
+                    if el:
+                        text = el.inner_text().strip()
+                        if text and len(text) > 2:
+                            return text
+                except Exception:
+                    continue
+            
+            # Fallback: Extract from document.title
+            title = page.evaluate("document.title") or ""
+            title = title.replace("Booking.com Extranet", "").replace("Booking.com", "").strip()
+            title = re.sub(r'^[:\-\|\s]+', '', title)
+            title = re.sub(r'[:\-\|\s]+$', '', title)
+            if title and len(title) > 2:
+                return title
+        except Exception:
+            pass
+        return ""
+
     def extract_data(self, page, selected_fields: list[dict]) -> list[dict]:
         """Extract rows from the currently loaded Booking.com extranet page.
         Routes to section-specific extraction methods based on the field key prefixes.
@@ -1123,6 +1200,11 @@ class BookingExtranetSource(ExtranetSource):
                     page.goto(url, timeout=30000, wait_until="domcontentloaded")
                     page.wait_for_timeout(3000) # let the page render
                     
+                    # Extract the exact property name from the actual property page!
+                    exact_name = self._extract_property_name_from_page(page)
+                    if exact_name:
+                        hotel_name = exact_name
+                    
                     # Call single-property extraction
                     rows = self._extract_single_property_data(page, field_keys, section)
                     
@@ -1141,7 +1223,20 @@ class BookingExtranetSource(ExtranetSource):
             return all_rows
 
         # Single-property extraction logic
-        return self._extract_single_property_data(page, field_keys, section)
+        # For single property, also try to tag with the exact hotel name and ID if we are on a valid extranet page
+        exact_hotel_name = self._extract_property_name_from_page(page)
+        hotel_id_match = re.search(r'hotel_id=(\d+)', page.url)
+        hotel_id = hotel_id_match.group(1) if hotel_id_match else ""
+        
+        rows = self._extract_single_property_data(page, field_keys, section)
+        if exact_hotel_name or hotel_id:
+            for r in rows:
+                if exact_hotel_name and not r.get("hotel_name"):
+                    r["hotel_name"] = exact_hotel_name
+                if hotel_id and not r.get("hotel_id"):
+                    r["hotel_id"] = hotel_id
+                    
+        return rows
 
 
 # ────────────────────────────────────────────────────────────
