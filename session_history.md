@@ -15,3 +15,10 @@
 - **universal_scraper.py** — Universal scraper tab
 - **scrape_ratings.py / scrape_ratings_fast.py** — Additional scraper implementations
 - **Various test files** — debug_mmt.py, test_mmt*.py, etc.
+
+## 2026-05-23
+
+### GUI Fix
+- Fixed critical bug in `app.py` where tab initialization was placed inside `dropEvent` instead of `__init__`.
+- Enabled drag-and-drop CSV handling to work correctly without causing NameErrors or reference crashes.
+
