@@ -574,7 +574,7 @@ class BookingExtranetSource(ExtranetSource):
                         if (!hotelId || !/^\d+$/.test(hotelId)) continue;
                         
                         hotelName = el.textContent.trim();
-                        if (hotelName.length < 4 || /manage|select|go|enter|edit|open/i.test(hotelName)) {
+                        if (hotelName.length < 4 || /manage|select|go|enter|edit|open/i.test(hotelName) || /^\d+$/.test(hotelName)) {
                             const row = el.closest('tr') || el.closest('[class*="row"]') || el.closest('[class*="item"]') || el.closest('li');
                             if (row) {
                                 const cells = row.querySelectorAll('td, div, span, a');
@@ -1295,14 +1295,30 @@ class BookingExtranetSource(ExtranetSource):
                 except Exception:
                     continue
             
-            # Fallback: Extract from document.title
+            # Fallback: Extract from document.title by splitting on structural separators
             title = page.evaluate("document.title") or ""
-            title = title.replace("Booking.com Extranet", "").replace("Booking.com", "").strip()
-            title = re.sub(r'^[:\-\|\s]+', '', title)
-            title = re.sub(r'[:\-\|\s]+$', '', title)
-            if title and len(title) > 2:
-                if title.lower() not in exclude_words and not any(w in title.lower() for w in exclude_words):
-                    return title
+            parts = re.split(r'[\-\|·•:—–\(\)]+', title)
+            cleaned_parts = []
+            for part in parts:
+                p = part.strip()
+                if not p:
+                    continue
+                # Clean up Booking keywords
+                p_clean = p.replace("Booking.com Extranet", "").replace("Booking.com", "").replace("Extranet", "").strip()
+                p_clean_lower = p_clean.lower()
+                
+                if not p_clean or len(p_clean) < 3:
+                    continue
+                if p_clean_lower in exclude_words:
+                    continue
+                if p_clean_lower in ["booking", "extranet", "com", "admin", "hotel", "property"]:
+                    continue
+                if re.match(r'^\d+$', p_clean):
+                    continue
+                cleaned_parts.append(p_clean)
+                
+            if cleaned_parts:
+                return cleaned_parts[0]
         except Exception:
             pass
         return ""
