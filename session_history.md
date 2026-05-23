@@ -22,7 +22,8 @@
 - Fixed critical bug in `app.py` where tab initialization was placed inside `dropEvent` instead of `__init__`.
 - Enabled drag-and-drop CSV handling to work correctly without causing NameErrors or reference crashes.
 - Fixed PyQt6 initialization crash in `ratings_tab.py` where `platform_tabs.currentChanged` signal was connected before child widgets (`bulk_input`, `quick_input`) were constructed, throwing an `AttributeError`. Safety checks with `hasattr` were also added.
-- Fixed Booking.com platform filtering bug where name-only search items (categorized as `source: 'search'`) were skipped when the Booking.com sub-tab was selected. Added an exception to the filter to retain `search` items when the `booking` platform is active.
+- Refactored platform filter logic in `ratings_tab.py` to be adaptive: when a specific sub-tab is active (e.g. Booking.com, Agoda, Expedia), all compatible items are dynamically adapted and retained (e.g. name-only items are converted to `'search'` or the respective platform's search) instead of being skipped. This prevents skipping items when CSV files contain both names and numeric MakeMyTrip IDs (FH IDs) but are scraped on the Booking.com tab.
+
 
 
 

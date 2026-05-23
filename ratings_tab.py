@@ -596,19 +596,45 @@ class RatingsTab(QWidget):
             self.log.append("Nothing to scrape. Paste links/names above or load a CSV.")
             return
 
-        # Filter by active platform (if not 'quick')
+        # Filter and adapt by active platform (if not 'quick')
         if self._active_platform != 'quick':
-            kept_indices = [
-                i for i, item in enumerate(self.items)
-                if item['source'] == self._active_platform
-                or (self._active_platform == 'booking' and item['source'] == 'search')
-                or (self._active_platform == 'mmt' and item.get('hotel_id'))
-            ]
+            kept_indices = []
+            for i, item in enumerate(self.items):
+                # 1. Booking.com Tab
+                if self._active_platform == 'booking':
+                    if item.get('url') and 'booking.com' in item['url']:
+                        item['source'] = 'booking'
+                        kept_indices.append(i)
+                    elif item.get('name'):
+                        item['source'] = 'search'
+                        kept_indices.append(i)
+
+                # 2. MakeMyTrip Tab
+                elif self._active_platform == 'mmt':
+                    if item.get('hotel_id'):
+                        item['source'] = 'mmt'
+                        kept_indices.append(i)
+                    elif item.get('url') and 'makemytrip' in item['url']:
+                        m = re.search(r'hotelId=(\w+)', item['url'])
+                        if m:
+                            item['hotel_id'] = m.group(1)
+                            item['source'] = 'mmt'
+                            kept_indices.append(i)
+
+                # 3. Agoda or Expedia Tabs
+                elif self._active_platform in ('agoda', 'expedia'):
+                    if item.get('url') and self._active_platform in item['url']:
+                        item['source'] = self._active_platform
+                        kept_indices.append(i)
+                    elif item.get('name'):
+                        item['source'] = self._active_platform
+                        kept_indices.append(i)
+
             skipped = len(self.items) - len(kept_indices)
             if skipped:
                 self.log.append(
                     f"Platform filter [{PLATFORM_DESCRIPTIONS[self._active_platform]['title']}]: "
-                    f"skipping {skipped} items"
+                    f"skipping {skipped} items that cannot be scraped on this platform"
                 )
             self.items = [self.items[i] for i in kept_indices]
             if self.original_rows:
