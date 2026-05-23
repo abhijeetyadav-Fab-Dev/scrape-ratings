@@ -5,6 +5,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 BASE = os.path.dirname(os.path.abspath(__file__))
 
 test_cases = [
+    # Existing column-format detection tests
     # Expected: which rows should be detected as MMT (by row content, not by index)
     # test5: row 2 has MMT URL, row 1 and 3 have Booking URLs -> 1 MMT
     # test6: row 3 has MMT URL, row 1 has Booking URL -> 1 MMT
@@ -14,6 +15,11 @@ test_cases = [
     ("test4_underscore_format.csv", 3, "Hotel_ID,Hotel_Name,City -> all 3 MMT via Hotel_ID"),
     ("test5_lowercase_format.csv", 1, "id,name,city,url -> 1 MMT via URL, 2 Booking via URL"),
     ("test6_name_only_format.csv", 1, "Name,City,URL -> 1 MMT via URL, 1 Booking via URL"),
+    # Scenario-based test CSVs
+    ("booking_only.csv", 0, "3 Booking.com links -> 0 MMT (all Booking via URL)"),
+    ("mmt_only.csv", 3, "3 FH ID rows -> 3 MMT via numeric ID"),
+    ("mixed.csv", 2, "2 FH ID + 2 Booking URL + 1 name-only -> 2 MMT"),
+    ("search_only.csv", 0, "3 name-only rows -> 0 MMT (all search via name)"),
 ]
 
 print("=" * 70)
