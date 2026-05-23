@@ -605,6 +605,13 @@ class BookingExtranetSource(ExtranetSource):
                     if not any(x["id"] == p["id"] for x in properties):
                         properties.append(p)
                 
+                # Scroll to the bottom of the page to ensure lazy-loaded pagination elements are rendered and visible
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
                 # Look for a visible pagination 'Next' link or button
                 next_btn = None
                 try:
@@ -630,7 +637,11 @@ class BookingExtranetSource(ExtranetSource):
                             return btn.hasAttribute('disabled') || 
                                    btn.classList.contains('disabled') || 
                                    btn.getAttribute('aria-disabled') === 'true' ||
-                                   btn.classList.contains('bui-pagination__item--disabled');
+                                   btn.classList.contains('bui-pagination__item--disabled') ||
+                                   (btn.parentElement && (
+                                       btn.parentElement.classList.contains('bui-pagination__item--disabled') ||
+                                       btn.parentElement.classList.contains('disabled')
+                                   ));
                         }""", next_btn)
                     except Exception:
                         pass
@@ -639,7 +650,7 @@ class BookingExtranetSource(ExtranetSource):
                         
                     try:
                         next_btn.click()
-                        page.wait_for_timeout(3000) # Wait for page load to settle
+                        page.wait_for_timeout(1500) # Wait for page load to settle
                     except Exception:
                         break
                 else:
@@ -1352,7 +1363,18 @@ class BookingExtranetSource(ExtranetSource):
                 url = f"{base}/{path}?hotel_id={hotel_id}&ses={ses}&lang=en"
                 try:
                     page.goto(url, timeout=30000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(3000) # let the page render
+                    
+                    # Dynamic wait for page contents to render (promotions table, cards, or empty state text)
+                    try:
+                        page.wait_for_selector(
+                            ".promo-card, .offer-card, table, [data-promo-id], "
+                            "[class*='promo'], [class*='offer'], "
+                            "text='active promotions', text='no active promotions', "
+                            "text='Choose new promotion'",
+                            timeout=4000
+                        )
+                    except Exception:
+                        page.wait_for_timeout(1000) # fallback sleep
                     
                     # Extract the exact property name from the actual property page!
                     exact_name = self._extract_property_name_from_page(page)
