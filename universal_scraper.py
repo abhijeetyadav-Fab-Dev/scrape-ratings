@@ -117,6 +117,44 @@ class ExtranetSource(ABC):
         """
         ...
 
+    def _append_scraped_property_data(self, hotel_id: str, hotel_name: str, rows: list[dict], status: str = "Completed"):
+        """Shared helper to write a property's scraped rows to CSV and log to SQLite in real-time."""
+        session_id = getattr(self, "session_id", None)
+        out_path = getattr(self, "output_path", None)
+        
+        # 1. Update SQLite
+        if session_id:
+            try:
+                ScrapeHistoryManager.add_scraped_property(session_id, hotel_id, hotel_name, status, len(rows))
+            except Exception:
+                pass
+                
+        # 2. Append to CSV in real-time
+        if out_path and rows:
+            try:
+                file_exists = os.path.exists(out_path) and os.path.getsize(out_path) > 0
+                
+                # Construct ordered keys from job or dynamic discovery
+                field_keys = []
+                if getattr(self, "job", None):
+                    field_keys = [f["key"] for f in self.job.selected_fields]
+                else:
+                    all_keys = set()
+                    for r in rows:
+                        all_keys.update(r.keys())
+                    for k in ["hotel_id", "hotel_name", "_source", "_error"]:
+                        all_keys.discard(k)
+                    field_keys = sorted(list(all_keys))
+                o_keys = field_keys + ["hotel_id", "hotel_name", "_source", "_error"]
+                
+                with open(out_path, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=o_keys, extrasaction="ignore")
+                    if not file_exists:
+                        writer.writeheader()
+                    writer.writerows(rows)
+            except Exception:
+                pass
+
     # ── Shared helper methods for section-aware extraction ──
 
     def _try_selectors(self, page, selectors: list[str]) -> str:
@@ -516,27 +554,43 @@ class BookingExtranetSource(ExtranetSource):
             def scan_current_page():
                 return page.evaluate("""() => {
                     const props = [];
-                    const hrefElements = document.querySelectorAll('a[href*="hotel_id="]');
-                    for (const el of hrefElements) {
-                        const href = el.getAttribute('href') || '';
-                        const match = href.match(/hotel_id=(\d+)/);
-                        if (!match) continue;
-                        const hotelId = match[1];
+                    const elements = document.querySelectorAll('a, button, [data-hotel-id], [data-id]');
+                    for (const el of elements) {
+                        let hotelId = '';
+                        let hotelName = '';
                         
-                        let hotelName = el.textContent.trim();
-                        if (hotelName.length < 4 || /manage|select|go|enter|edit/i.test(hotelName)) {
-                            const row = el.closest('tr') || el.closest('[class*="row"]') || el.closest('[class*="item"]');
+                        if (el.getAttribute('data-hotel-id')) {
+                            hotelId = el.getAttribute('data-hotel-id');
+                        } else if (el.getAttribute('data-id') && /^\d+$/.test(el.getAttribute('data-id'))) {
+                            hotelId = el.getAttribute('data-id');
+                        } else {
+                            const href = el.getAttribute('href') || '';
+                            const match = href.match(/hotel_id=(\d+)/) || href.match(/\/hotel\/(\d+)/);
+                            if (match) {
+                                hotelId = match[1];
+                            }
+                        }
+                        
+                        if (!hotelId || !/^\d+$/.test(hotelId)) continue;
+                        
+                        hotelName = el.textContent.trim();
+                        if (hotelName.length < 4 || /manage|select|go|enter|edit|open/i.test(hotelName)) {
+                            const row = el.closest('tr') || el.closest('[class*="row"]') || el.closest('[class*="item"]') || el.closest('li');
                             if (row) {
-                                const cells = row.querySelectorAll('td, div, span');
+                                const cells = row.querySelectorAll('td, div, span, a');
                                 for (const cell of cells) {
+                                    if (cell === el) continue;
                                     const txt = cell.textContent.trim();
-                                    if (txt.length >= 4 && !txt.includes('hotel_id') && !/manage|select|go|enter|edit/i.test(txt)) {
+                                    if (txt.length >= 4 && !txt.includes('hotel_id') && !/^\d+$/.test(txt) && !/manage|select|go|enter|edit|open/i.test(txt)) {
                                         hotelName = txt;
                                         break;
                                     }
                                 }
                             }
                         }
+                        
+                        hotelName = hotelName.replace(/\s+/g, ' ').trim();
+                        
                         if (!props.some(p => p.id === hotelId)) {
                             props.push({ id: hotelId, name: hotelName });
                         }
@@ -1177,6 +1231,16 @@ class BookingExtranetSource(ExtranetSource):
             props_list = list(properties)
             self._properties = []
             
+            # Update SQLite session total properties count
+            session_id = getattr(self, "session_id", None)
+            if session_id:
+                ScrapeHistoryManager.update_session_counts(session_id, len(props_list))
+                
+            # Get already completed properties to skip them (resume functionality)
+            completed_props = set()
+            if session_id:
+                completed_props = ScrapeHistoryManager.get_completed_properties(session_id)
+            
             base = "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage"
             section_paths = {
                 "dashboard": "home.html",
@@ -1192,9 +1256,28 @@ class BookingExtranetSource(ExtranetSource):
             }
             path = section_paths.get(section, "promotions/list.html")
             
+            worker = getattr(self, "worker", None)
+            
             for idx, prop in enumerate(props_list):
+                # Graceful cancellation check
+                if worker and worker._stop:
+                    if worker:
+                        worker.log_msg.emit("Scrape job stop requested. Stopping multi-property loop...")
+                    break
+                    
                 hotel_id = prop["id"]
                 hotel_name = prop["name"]
+                
+                # Check for resume skip
+                if hotel_id in completed_props:
+                    if worker:
+                        worker.log_msg.emit(f"Skipping already completed property {idx+1}/{len(props_list)}: {hotel_name} ({hotel_id})")
+                        worker.progress.emit(idx, len(props_list), f"Skipping {hotel_name}...")
+                    continue
+                
+                if worker:
+                    worker.log_msg.emit(f"Scraping property {idx+1}/{len(props_list)}: {hotel_name} ({hotel_id})")
+                    worker.progress.emit(idx, len(props_list), f"Scraping {hotel_name}...")
                 
                 url = f"{base}/{path}?hotel_id={hotel_id}&ses={ses}&lang=en"
                 try:
@@ -1214,12 +1297,17 @@ class BookingExtranetSource(ExtranetSource):
                         r["hotel_id"] = hotel_id
                         r["hotel_name"] = hotel_name
                         all_rows.append(r)
+                        
+                    # Save incremental data & update SQLite
+                    self._append_scraped_property_data(hotel_id, hotel_name, rows, "Completed")
                 except Exception as e:
-                    all_rows.append({
+                    err_row = {
                         "_error": f"Failed to scrape hotel {hotel_name} ({hotel_id}): {str(e)}",
                         "hotel_id": hotel_id,
                         "hotel_name": hotel_name
-                    })
+                    }
+                    all_rows.append(err_row)
+                    self._append_scraped_property_data(hotel_id, hotel_name, [err_row], "Failed")
             
             return all_rows
 
@@ -1227,7 +1315,13 @@ class BookingExtranetSource(ExtranetSource):
         # For single property, also try to tag with the exact hotel name and ID if we are on a valid extranet page
         exact_hotel_name = self._extract_property_name_from_page(page)
         hotel_id_match = re.search(r'hotel_id=(\d+)', page.url)
-        hotel_id = hotel_id_match.group(1) if hotel_id_match else ""
+        hotel_id = hotel_id_match.group(1) if hotel_id_match else "single"
+        if not exact_hotel_name:
+            exact_hotel_name = "Single Property"
+            
+        session_id = getattr(self, "session_id", None)
+        if session_id:
+            ScrapeHistoryManager.update_session_counts(session_id, 1)
         
         rows = self._extract_single_property_data(page, field_keys, section)
         if exact_hotel_name or hotel_id:
@@ -1237,6 +1331,9 @@ class BookingExtranetSource(ExtranetSource):
                 if hotel_id and not r.get("hotel_id"):
                     r["hotel_id"] = hotel_id
                     
+        # Save incremental data & update SQLite
+        self._append_scraped_property_data(hotel_id, exact_hotel_name, rows, "Completed")
+        
         return rows
 
 
@@ -2811,6 +2908,12 @@ class ExtranetScrapeWorker(QThread):
         output_path = self.job.output_path or str(
             Path.home() / "Downloads" / f"{self.job.label}.csv"
         )
+        
+        # Set attributes on source singleton immediately (early initialization)
+        source.output_path = output_path
+        source.session_id = self.session_id
+        source.job = self.job
+        source.worker = self
 
         # Initialize or update session in SQLite history
         selected_field_keys = self.job.selected_fields
@@ -2850,9 +2953,8 @@ class ExtranetScrapeWorker(QThread):
             )
             page = context.pages[0] if context.pages else context.new_page()
             
-            # Pass outputs and session details to the source singleton
-            source.output_path = output_path
-            source.session_id = self.session_id
+            # Singleton attributes already early-initialized at start of run()
+            pass
 
             # ── Login (if needed) ──────────────────────────
             cookies_path = source.cookies_path
@@ -3053,19 +3155,49 @@ class ExtranetScrapeWorker(QThread):
             context.close()
             pw.stop()
 
-            # ── Write output CSV (written in real-time) ───────────────────────────
+            # ── Double-Safety CSV Write & Consolidation ───────────────────────────
             if self._stop:
                 ScrapeHistoryManager.complete_session(self.session_id, "Interrupted")
                 self.log_msg.emit("\nScrape job stopped/interrupted by user.")
                 self.finished.emit(output_path, 0)
             elif all_rows:
+                # Read any existing rows from CSV first (for resume safety)
+                existing_rows = []
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    try:
+                        with open(output_path, "r", newline="", encoding="utf-8") as f:
+                            reader = csv.DictReader(f)
+                            for r in reader:
+                                existing_rows.append(dict(r))
+                    except Exception as e:
+                        self.log_msg.emit(f"Warning: could not read existing CSV for consolidation: {e}")
+                
+                # Combine: remove old rows for hotels we just scraped to prevent duplicates
+                scraped_hotel_ids = {r.get("hotel_id") for r in all_rows if r.get("hotel_id")}
+                consolidated = [r for r in existing_rows if r.get("hotel_id") not in scraped_hotel_ids]
+                consolidated.extend(all_rows)
+                
+                # Rewrite consolidated data
+                try:
+                    with open(output_path, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=ordered_keys, extrasaction="ignore")
+                        writer.writeheader()
+                        writer.writerows(consolidated)
+                except Exception as e:
+                    self.log_msg.emit(f"Error writing final CSV file: {e}")
+
                 ScrapeHistoryManager.complete_session(self.session_id, "Completed")
+                
+                # Get the actual total row count for the session from SQLite for accuracy
+                session_stats = ScrapeHistoryManager.get_session(self.session_id)
+                final_row_count = session_stats.get("total_rows", len(consolidated)) if session_stats else len(consolidated)
+                
                 self.log_msg.emit(f"\nDone! Scrape finished successfully.")
                 self.log_msg.emit(f"  Output saved to: {output_path}")
                 self.progress.emit(section_count, section_count, "Complete!")
-                self.finished.emit(output_path, len(all_rows))
+                self.finished.emit(output_path, final_row_count)
             else:
-                # If no rows extracted but we didn't stop, check if there's data in the database
+                # If no rows extracted in this run, check if there's data in the database
                 session_stats = ScrapeHistoryManager.get_session(self.session_id)
                 total_rows = session_stats.get("total_rows", 0) if session_stats else 0
                 if total_rows > 0:
