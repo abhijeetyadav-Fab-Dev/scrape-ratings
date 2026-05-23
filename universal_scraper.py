@@ -504,6 +504,44 @@ class BookingExtranetSource(ExtranetSource):
         time.sleep(3)
 
     def navigate_to_section(self, page, section_key: str) -> None:
+        # Check if we are on the Group Homepage
+        current_url = page.url.lower()
+        if "/groups/home/" in current_url:
+            # Let the DOM settle
+            page.wait_for_timeout(2000)
+            properties = page.evaluate("""() => {
+                const props = [];
+                const hrefElements = document.querySelectorAll('a[href*="hotel_id="]');
+                for (const el of hrefElements) {
+                    const href = el.getAttribute('href') || '';
+                    const match = href.match(/hotel_id=(\d+)/);
+                    if (!match) continue;
+                    const hotelId = match[1];
+                    
+                    let hotelName = el.textContent.trim();
+                    if (hotelName.length < 4 || /manage|select|go|enter|edit/i.test(hotelName)) {
+                        const row = el.closest('tr') || el.closest('[class*="row"]') || el.closest('[class*="item"]');
+                        if (row) {
+                            const cells = row.querySelectorAll('td, div, span');
+                            for (const cell of cells) {
+                                const txt = cell.textContent.trim();
+                                if (txt.length >= 4 && !txt.includes('hotel_id') && !/manage|select|go|enter|edit/i.test(txt)) {
+                                    hotelName = txt;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!props.some(p => p.id === hotelId)) {
+                        props.push({ id: hotelId, name: hotelName });
+                    }
+                }
+                return props;
+            }""")
+            self._properties = properties
+        else:
+            self._properties = []
+
         # Extract session parameters from current page URL (ses, hotel_account_id, hotel_id)
         # First, wait up to 10 seconds for session parameters to appear in the URL (if the page is loading/redirecting)
         ses_match = None
@@ -537,10 +575,16 @@ class BookingExtranetSource(ExtranetSource):
             params.append(f"ses={ses_match.group(1)}")
         if account_match:
             params.append(f"hotel_account_id={account_match.group(1)}")
-        if hotel_match:
+            
+        # Override hotel_id if we scanned properties from group homepage
+        properties = getattr(self, "_properties", [])
+        if properties:
+            params.append(f"hotel_id={properties[0]['id']}")
+        elif hotel_match:
             params.append(f"hotel_id={hotel_match.group(1)}")
+            
         params.append("lang=en")
-        param_str = "?" + "&".join(params) if ses_match or account_match or hotel_match else ""
+        param_str = "?" + "&".join(params) if (ses_match or account_match or hotel_match or properties) else ""
 
         section_map = {
             "dashboard":     f"{base}/home.html{param_str}",
@@ -552,7 +596,7 @@ class BookingExtranetSource(ExtranetSource):
             "reviews":       f"{base}/reviews.html{param_str}",
             "financial":     f"{base}/finance.html{param_str}",
             "analytics":     f"{base}/analytics.html{param_str}",
-            "promotions":    f"{base}/promotions.html{param_str}",
+            "promotions":    f"{base}/promotions/list.html{param_str}",
         }
         url = section_map.get(section_key, base)
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
@@ -956,14 +1000,7 @@ class BookingExtranetSource(ExtranetSource):
 
         return rows
 
-    def extract_data(self, page, selected_fields: list[dict]) -> list[dict]:
-        """Extract rows from the currently loaded Booking.com extranet page.
-        Routes to section-specific extraction methods based on the field key prefixes.
-        Falls back to generic table/body extraction if no fields are matched.
-        """
-        field_keys = [f["key"] for f in selected_fields]
-        section = self._detect_section(field_keys)
-
+    def _extract_single_property_data(self, page, field_keys: list[str], section: str) -> list[dict]:
         # ── Section-specific extraction ──────────────────────
         if section == "property":
             row = self._extract_property_fields(page, field_keys)
@@ -1042,6 +1079,69 @@ class BookingExtranetSource(ExtranetSource):
 
         # ── Generic fallback (inherited from ExtranetSource) ─
         return self._generic_fallback(page)
+
+    def extract_data(self, page, selected_fields: list[dict]) -> list[dict]:
+        """Extract rows from the currently loaded Booking.com extranet page.
+        Routes to section-specific extraction methods based on the field key prefixes.
+        Falls back to generic table/body extraction if no fields are matched.
+        """
+        field_keys = [f["key"] for f in selected_fields]
+        section = self._detect_section(field_keys)
+
+        # Check if we have multiple properties scanned from the Group Homepage
+        properties = getattr(self, "_properties", [])
+        if properties and len(properties) > 1:
+            all_rows = []
+            ses_match = re.search(r'ses=([a-f0-9]+)', page.url)
+            ses = ses_match.group(1) if ses_match else ""
+            
+            # Keep a copy of properties and clear self._properties to prevent infinite recursion
+            props_list = list(properties)
+            self._properties = []
+            
+            base = "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage"
+            section_paths = {
+                "dashboard": "home.html",
+                "reservations": "reservations.html",
+                "rates": "rates_availability.html",
+                "property": "property.html",
+                "boost": "boost_performance.html",
+                "inbox": "inbox.html",
+                "reviews": "reviews.html",
+                "financial": "finance.html",
+                "analytics": "analytics.html",
+                "promotions": "promotions/list.html",
+            }
+            path = section_paths.get(section, "promotions/list.html")
+            
+            for idx, prop in enumerate(props_list):
+                hotel_id = prop["id"]
+                hotel_name = prop["name"]
+                
+                url = f"{base}/{path}?hotel_id={hotel_id}&ses={ses}&lang=en"
+                try:
+                    page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                    page.wait_for_timeout(3000) # let the page render
+                    
+                    # Call single-property extraction
+                    rows = self._extract_single_property_data(page, field_keys, section)
+                    
+                    # Tag with hotel info
+                    for r in rows:
+                        r["hotel_id"] = hotel_id
+                        r["hotel_name"] = hotel_name
+                        all_rows.append(r)
+                except Exception as e:
+                    all_rows.append({
+                        "_error": f"Failed to scrape hotel {hotel_name} ({hotel_id}): {str(e)}",
+                        "hotel_id": hotel_id,
+                        "hotel_name": hotel_name
+                    })
+            
+            return all_rows
+
+        # Single-property extraction logic
+        return self._extract_single_property_data(page, field_keys, section)
 
 
 # ────────────────────────────────────────────────────────────
