@@ -1259,17 +1259,29 @@ class BookingExtranetSource(ExtranetSource):
             # Settle DOM briefly
             page.wait_for_timeout(1000)
             
-            # Selector list representing common elements containing hotel/property name on Booking.com
+            # Words to exclude (since they represent section/page names rather than hotel names)
+            exclude_words = {
+                "promotions", "rates & availability", "rates", "availability", 
+                "reservations", "property", "inbox", "reviews", "finance", 
+                "analytics", "dashboard", "home", "group home", "extranet", 
+                "calendar", "bulk edit", "deals", "offers", "opportunities"
+            }
+            
+            # Selector list representing elements containing hotel/property name on Booking.com
             selectors = [
                 "[class*='hotel-name']",
                 "[class*='property-name']",
                 "[data-name='hotel-name']",
                 "[data-name='property-name']",
+                "div[class*='property-name']",
+                "[class*='property-selector']",
+                "span[class*='property_name']",
+                ".property_name",
+                ".hotel_name",
                 "span[class*='bui-header__title']",
                 ".bui-header__title",
                 "h1[class*='name']",
                 "h1[class*='title']",
-                "div[class*='property-name']",
                 "[class*='header-title']",
             ]
             for sel in selectors:
@@ -1278,7 +1290,8 @@ class BookingExtranetSource(ExtranetSource):
                     if el:
                         text = el.inner_text().strip()
                         if text and len(text) > 2:
-                            return text
+                            if text.lower() not in exclude_words and not any(w in text.lower() for w in exclude_words):
+                                return text
                 except Exception:
                     continue
             
@@ -1288,7 +1301,8 @@ class BookingExtranetSource(ExtranetSource):
             title = re.sub(r'^[:\-\|\s]+', '', title)
             title = re.sub(r'[:\-\|\s]+$', '', title)
             if title and len(title) > 2:
-                return title
+                if title.lower() not in exclude_words and not any(w in title.lower() for w in exclude_words):
+                    return title
         except Exception:
             pass
         return ""
@@ -1378,7 +1392,7 @@ class BookingExtranetSource(ExtranetSource):
                     
                     # Extract the exact property name from the actual property page!
                     exact_name = self._extract_property_name_from_page(page)
-                    if exact_name:
+                    if exact_name and exact_name.lower() not in ["promotions", "rates", "availability", "reservations", "property", "inbox", "reviews", "finance", "analytics", "dashboard", "home", "extranet"]:
                         hotel_name = exact_name
                     
                     # Call single-property extraction
