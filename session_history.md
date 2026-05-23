@@ -21,4 +21,6 @@
 ### GUI Fix
 - Fixed critical bug in `app.py` where tab initialization was placed inside `dropEvent` instead of `__init__`.
 - Enabled drag-and-drop CSV handling to work correctly without causing NameErrors or reference crashes.
+- Fixed PyQt6 initialization crash in `ratings_tab.py` where `platform_tabs.currentChanged` signal was connected before child widgets (`bulk_input`, `quick_input`) were constructed, throwing an `AttributeError`. Safety checks with `hasattr` were also added.
+
 
