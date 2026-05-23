@@ -505,16 +505,26 @@ class BookingExtranetSource(ExtranetSource):
 
     def navigate_to_section(self, page, section_key: str) -> None:
         # Extract session parameters from current page URL (ses, hotel_account_id, hotel_id)
-        # If they're missing (page hasn't navigated to extranet yet), go to login first
-        current_url = page.url
-        ses_match = re.search(r'ses=([a-f0-9]+)', current_url)
-        account_match = re.search(r'hotel_account_id=(\d+)', current_url)
-        hotel_match = re.search(r'hotel_id=(\d+)', current_url)
+        # First, wait up to 10 seconds for session parameters to appear in the URL (if the page is loading/redirecting)
+        ses_match = None
+        account_match = None
+        hotel_match = None
+        
+        for _ in range(10):
+            current_url = page.url
+            ses_match = re.search(r'ses=([a-f0-9]+)', current_url)
+            account_match = re.search(r'hotel_account_id=(\d+)', current_url)
+            hotel_match = re.search(r'hotel_id=(\d+)', current_url)
+            if ses_match or account_match or hotel_match:
+                break
+            page.wait_for_timeout(1000)
 
         # If no ses params, navigate to login to establish session
         if not ses_match and not account_match and not hotel_match:
-            page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
-            time.sleep(4)
+            # Check if we are already on a login or error page. If so, don't trigger redundant page loads
+            if "login" not in page.url.lower():
+                page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
+                time.sleep(4)
             current_url = page.url
             ses_match = re.search(r'ses=([a-f0-9]+)', current_url)
             account_match = re.search(r'hotel_account_id=(\d+)', current_url)
@@ -2486,47 +2496,81 @@ class ExtranetScrapeWorker(QThread):
                 #   2. Populates page.url with session params (ses, hotel_id, etc.)
                 #   3. Essential for Booking.com — navigate_to_section needs ses params from URL
                 page.goto(source.login_url, timeout=30000, wait_until="domcontentloaded")
-                time.sleep(3)
-                # Check if session is still valid.
-                # If we are on the login form, the page body will contain login elements,
-                # or the URL will contain '/login' or similar login patterns.
-                page.wait_for_timeout(2000) # Wait for redirects to settle
                 
-                body_text = ""
-                try:
-                    body_text = page.inner_text("body")[:2000].lower()
-                except Exception:
-                    pass
+                # Let's wait up to 8 seconds for redirects to settle and evaluate if session is active
+                is_session_active = False
+                for i in range(8):
+                    page.wait_for_timeout(1000)
+                    current_url = page.url.lower()
                     
-                current_url = page.url.lower()
+                    body_text = ""
+                    try:
+                        body_text = page.inner_text("body")[:2000].lower()
+                    except Exception:
+                        pass
+                    
+                    has_password_input = False
+                    try:
+                        has_password_input = page.query_selector("input[type='password']") is not None
+                    except Exception:
+                        pass
+                        
+                    login_indicators = [
+                        "sign in to manage",      # Booking.com
+                        "sign in with",           # Generic
+                        "log in to your",         # Generic
+                        "enter your password",    # Login form
+                        "forgot password",        # Login form
+                        "create your account",    # Booking.com signup
+                        "login-form",             # Form class
+                        "username",               # Input name
+                        "password",               # Input name
+                    ]
+                    has_login_text = any(ind in body_text for ind in login_indicators)
+                    
+                    # Detect if we landed on an error page (e.g. "sorry, this page does not exist")
+                    is_err, _ = source._is_error_page(page)
+                    
+                    if "admin.booking.com" in current_url:
+                        has_session_params = "ses=" in current_url or "hotel_id=" in current_url or "hotel_account_id=" in current_url
+                        has_dashboard_path = any(x in current_url for x in ("/hotel/", "/extranet/", "/dashboard/"))
+                        
+                        if has_session_params and has_dashboard_path and not has_password_input and not has_login_text and not is_err:
+                            is_session_active = True
+                            break
+                        elif has_password_input or has_login_text or "login" in current_url or is_err:
+                            is_session_active = False
+                            break
+                    else:
+                        # Non-booking sources logic
+                        if not has_password_input and not has_login_text and not is_err and any(x in current_url for x in ("dashboard", "home", "extranet")):
+                            is_session_active = True
+                            break
+                        elif has_password_input or has_login_text or "login" in current_url or is_err:
+                            is_session_active = False
+                            break
                 
-                login_indicators = [
-                    "sign in to manage",      # Booking.com
-                    "sign in with",           # Generic
-                    "log in to your",         # Generic
-                    "enter your password",    # Login form
-                    "forgot password",        # Login form
-                    "create your account",    # Booking.com signup
-                    "login-form",             # Form class
-                    "username",               # Input name
-                    "password",               # Input name
-                ]
-                
-                # Check if it matches login patterns in body or URL
-                is_login_page = any(ind in body_text for ind in login_indicators) or "login" in current_url
-                
-                # For Booking.com Specifically, a logged-in session URL must contain '/hotel/', '/extranet/', or '/dashboard/'
-                if "admin.booking.com" in current_url:
-                    if not any(x in current_url for x in ("/hotel/", "/extranet/", "/dashboard/")):
-                        is_login_page = True
-                
-                if not is_login_page:
+                if is_session_active:
                     self.log_msg.emit("Session active.")
                 else:
                     self.log_msg.emit("Session expired — re-login required.")
                     self.login_required.emit(f"{source.source_name} session expired, please log in again.")
                     self.log_msg.emit("Chrome opened — log in and confirm in the app.")
                     self.login_event.wait()
+                    
+                    # Wait for dashboard/home URL with session parameters to appear to ensure login succeeded
+                    self.log_msg.emit("Waiting for dashboard to load...")
+                    has_params = False
+                    for _ in range(15):
+                        current_url = page.url.lower()
+                        if "ses=" in current_url or "hotel_id=" in current_url or "hotel_account_id=" in current_url:
+                            has_params = True
+                            break
+                        page.wait_for_timeout(1000)
+                    
+                    if not has_params:
+                        self.log_msg.emit("Warning: Dashboard URL with session parameters not detected yet.")
+                        
                     cookies = context.cookies()
                     with open(cookies_path, "wb") as f:
                         pickle.dump(cookies, f)
@@ -2538,6 +2582,17 @@ class ExtranetScrapeWorker(QThread):
                 self.login_required.emit(f"{source.source_name} login required.")
                 self.log_msg.emit("Chrome opened — log in and confirm in the app.")
                 self.login_event.wait()
+                
+                # Wait for dashboard/home URL with session parameters to appear to ensure login succeeded
+                self.log_msg.emit("Waiting for dashboard to load...")
+                has_params = False
+                for _ in range(15):
+                    current_url = page.url.lower()
+                    if "ses=" in current_url or "hotel_id=" in current_url or "hotel_account_id=" in current_url:
+                        has_params = True
+                        break
+                    page.wait_for_timeout(1000)
+                
                 cookies = context.cookies()
                 if cookies_path:
                     with open(cookies_path, "wb") as f:
