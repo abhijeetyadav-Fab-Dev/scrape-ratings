@@ -33,12 +33,18 @@
 - Fixed Playwright launch context crash in `universal_scraper.py` by restoring `launch_persistent_context` instead of `launch` when using `--user-data-dir` as an argument (which Playwright explicitly forbids).
 - Fixed Booking.com Extranet session validation bug in `universal_scraper.py` where a simple redirect check falsely verified system-redirects to the login form index.html as a successful login (active dashboard session). Implemented robust multi-indicator verification checking page DOM body text and checking if the URL actually contains expected path segments (`/hotel/`, `/extranet/`, `/dashboard/`).
 
-
-
-
-
-
-
-
-
-
+### Universal Scraper Upgrades & Group Multi-Property Support
+- **Robust Session Redirection Verification**: Implemented a polling check that waits up to 8 seconds for redirects to fully settle. Validates active session context by ensuring the absence of password fields, login text indicators, or error pages (like *"sorry, this page does not exist"*), resolving false-positive session validations.
+- **Delayed Session Parameter Capture**: Implemented a 15-second wait for active dashboard parameters (`ses=...`, `hotel_id=...`, `hotel_account_id=...`) to appear in the URL before saving and refreshing pickled session cookies, ensuring only fully authenticated sessions are recorded.
+- **Disrupted Reload Protection**: Inside `navigate_to_section()`, added an initial 10-second polling wait for URL params to load. Bypasses redundant target navigations if the browser is currently showing the login page, completely preventing page reloads while the user is typing credentials.
+- **Booking.com Extranet Group Homepage Auto-Detection**: Added scanning for `/groups/home/` in the URL to automatically detect if the account manages a portfolio of multiple properties.
+- **Portfolio Table DOM Scanner**: Designed a Javascript DOM parser that evaluates the Group Homepage table, automatically extracts all managed `hotel_id` parameters, and resolves their names.
+- **Recursive Portfolio Pagination**: Implemented recursive portfolio table pagination (up to 15 pages). The scraper automatically locates and clicks the visible pagination "Next" button/arrow, waits for the table to settle, and continues scanning until the entire portfolio is queued.
+- **Real-Time DOM Hotel Name Extraction**: Created `_extract_property_name_from_page()` which inspects header elements (or parses document `<title>`) right after loading each individual hotel's page, capturing the exact formatted hotel name with 100% accuracy.
+- **Uniform Metadata Tagging**: Dynamically tags both multi-property and single-property scrapes with the exact `hotel_name` and `hotel_id` columns, providing clean and consistent CSV reporting.
+- **SQLite History Logging (`ScrapeHistoryManager`)**: Integrated `sqlite3` to maintain a local Scrape History database (`scrape_history.db` under `.scrape-ratings`). Logs every run, capturing Platform, Start Timestamp, Fields, Status, Progress, and Total Rows.
+- **Real-Time Incremental Saving**: Restructured the scraper engine to write/append extracted records to the output CSV in real-time as each individual hotel finishes scraping, fully protecting against data loss in case of abrupt system closures, power losses, or manual cancellations.
+- **Scrape Resume / Crash Recovery**: Implemented resume support to query the SQLite database and automatically skip already completed property IDs for the current session, picking up right where it was interrupted.
+- **Double-Tab PyQt GUI Dashboard**: Redesigned the Universal Scraper Tab into a dual sub-tab interface:
+  1. **Scraper Config**: To configure new runs and view logging.
+  2. **Scrape History & Resume**: Renders a premium historical table containing past session runs with Month and Status filters, a one-click **"Open CSV"** action to view spreadsheet files instantly in your default system viewer (e.g. Excel), and a **"Resume"** action to instantly recover and resume interrupted scrape runs!
