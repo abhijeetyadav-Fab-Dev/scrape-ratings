@@ -601,6 +601,7 @@ class RatingsTab(QWidget):
             kept_indices = [
                 i for i, item in enumerate(self.items)
                 if item['source'] == self._active_platform
+                or (self._active_platform == 'booking' and item['source'] == 'search')
                 or (self._active_platform == 'mmt' and item.get('hotel_id'))
             ]
             skipped = len(self.items) - len(kept_indices)
