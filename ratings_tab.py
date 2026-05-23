@@ -515,40 +515,46 @@ class RatingsTab(QWidget):
                 hotel_id = row[id_idx].strip() if id_idx is not None and id_idx < len(row) else ''
                 raw_line = ' '.join(row).strip()
 
-                if not name or name.lower() in ('name', 'hotel name', 'hotel'):
-                    if url or hotel_id:
-                        name = url[:50] or hotel_id
-                    else:
-                        continue
+                # Ensure we have at least one valid identifier (name, url, or hotel_id)
+                if not name and not url and not hotel_id:
+                    continue
 
                 self.original_rows.append(row)
 
-                detected = detect_input_type(raw_line)
-                if detected['platform'] == 'mmt':
-                    hid = detected.get('hotel_id') or hotel_id
-                    self.items.append({
-                        'name': name, 'city': city, 'url': detected.get('url', url),
-                        'source': 'mmt', 'hotel_id': hid
-                    })
-                elif detected['platform'] in ('booking', 'agoda', 'expedia'):
-                    self.items.append({
-                        'name': name, 'city': city,
-                        'url': detected.get('url', url),
-                        'source': detected['platform']
-                    })
-                elif url and 'booking.com' in url:
-                    self.items.append({'name': name, 'city': city, 'url': url, 'source': 'booking'})
-                elif url and 'makemytrip' in url:
-                    m = re.search(r'hotelId=(\w+)', url)
-                    hid = m.group(1) if m else hotel_id
-                    self.items.append({'name': name, 'city': city, 'url': url, 'source': 'mmt', 'hotel_id': hid})
-                elif hotel_id and hotel_id.replace('#', '').strip().isdigit():
-                    self.items.append({
-                        'name': name, 'city': city, 'url': '',
-                        'source': 'mmt', 'hotel_id': hotel_id.replace('#', '').strip()
-                    })
-                elif name:
-                    self.items.append({'name': name, 'city': city, 'url': url, 'source': 'search'})
+                # Prioritization logic:
+                # 1. Hotel Name is present
+                if name and name.lower() not in ('name', 'hotel name', 'hotel'):
+                    # Check if the URL column contains a specific platform link
+                    if url and 'booking.com' in url.lower():
+                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'booking', 'hotel_id': hotel_id})
+                    elif url and 'makemytrip.com' in url.lower():
+                        m = re.search(r'hotelId=(\w+)', url)
+                        hid = m.group(1) if m else hotel_id
+                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'mmt', 'hotel_id': hid})
+                    elif url and 'agoda.com' in url.lower():
+                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'agoda', 'hotel_id': hotel_id})
+                    elif url and 'expedia.com' in url.lower():
+                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'expedia', 'hotel_id': hotel_id})
+                    else:
+                        # Default to search-by-name since name is present but no specific URL is detected
+                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'search', 'hotel_id': hotel_id})
+
+                # 2. Name is NOT present, but URL is present
+                elif url:
+                    detected = detect_input_type(url)
+                    extracted_name = detected.get('name') or url[:50]
+                    if detected['platform'] == 'mmt':
+                        hid = detected.get('hotel_id') or hotel_id
+                        self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': 'mmt', 'hotel_id': hid})
+                    elif detected['platform'] in ('booking', 'agoda', 'expedia'):
+                        self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': detected['platform'], 'hotel_id': hotel_id})
+                    else:
+                        self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': 'search', 'hotel_id': hotel_id})
+
+                # 3. Only ID is present
+                elif hotel_id:
+                    clean_id = hotel_id.replace('#', '').strip()
+                    self.items.append({'name': clean_id, 'city': city, 'url': '', 'source': 'mmt', 'hotel_id': clean_id})
 
             has_links = sum(1 for i in self.items if i['url'] and 'http' in i['url'])
             names_only = len(self.items) - has_links
