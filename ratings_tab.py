@@ -491,10 +491,19 @@ class RatingsTab(QWidget):
                                 return i
                 return None
 
-            name_idx = find_col('name', 'hotel')
+            # Strict name column match (exclude ID, Code, Link, URL, and FH columns)
+            name_idx = None
+            for i, h in enumerate(lower_headers):
+                if ('name' in h or 'hotel' in h) and not any(x in h for x in ('code', 'id', 'link', 'url', 'fh')):
+                    name_idx = i
+                    break
+            
+            if name_idx is None:
+                name_idx = find_col('name', 'hotel')
+
             city_idx = find_col('city', 'location')
-            link_idx = find_col('mmt', 'link', 'url')
-            id_idx = find_col('fhid', 'fh id', 'fh', 'front-end id', 'mmt id', 'hotel id', 'hotel_id')
+            link_idx = find_col('booking', 'mmt', 'agoda', 'expedia', 'link', 'url')
+            id_idx = find_col('fhid', 'fh id', 'fh', 'front-end id', 'mmt id', 'hotel code', 'hotel id', 'hotel_id', 'code', 'id')
 
             if link_idx is not None and header_idx + 1 < len(rows):
                 test_row = rows[header_idx + 1]

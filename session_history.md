@@ -28,6 +28,9 @@
 - Implemented **CSV Format Preservation & In-Place Overwrite**: Refactored `save_incremental` in `ratings_tab.py` to dynamically map and overwrite existing `Scraped_Rating`, `Scraped_Reviews`, `Scraped_Source`, and `Scraped_Fail_Reason` columns in-place if they exist, or append them cleanly if not, fully preserving the user's original CSV columns and order.
 - Implemented **Blazing-Fast Scraping Speed Optimization**: Added route interception in `ratings_platforms.py` (`new_page`) to block load requests for images, stylesheets, fonts, and media. This reduces network overhead and page load times by up to 500% in headless mode.
 - Expanded GUI worker count selector limits to `100` parallel threads in `ratings_tab.py` to leverage system capacity and finish 15k+ hotels in ~15 to 20 minutes.
+- Fixed critical **Playwright Threading/Greenlet switching crash** in `ratings_platforms.py` by implementing a robust **Thread-Local Browser Pool** using Python's `threading.local()`. This isolates browser and manager instances per thread, completely preventing greenlet collisions in parallel scraping, and automatically handles clean-up of all instances.
+- Improved header parsing logic in `ratings_tab.py` to prevent ID, Code, Link, or URL columns from being misidentified as the name column (`name_idx`) when proper hotel name columns are present. Expanded `id_idx` keyword boundaries to cover all spelling variations of `fhid`, `fh id`, `hotel code`, `code`, etc.
+
 
 
 

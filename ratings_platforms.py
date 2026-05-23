@@ -25,23 +25,32 @@ COOKIES_DIR.mkdir(exist_ok=True)
 MMT_COOKIES = COOKIES_DIR / "mmt_cookies.pkl"
 
 
-# ── Shared browser pool for headless scraping ──────────────
+# ── Thread-local browser pool for concurrent headless scraping ──────────────
 
 _browser_lock = threading.Lock()
-_shared_browser = None
-_pw_manager = None
+_thread_local = threading.local()
+_all_thread_browsers = []
+_all_thread_pw_managers = []
 
 
 def _get_headless_browser():
-    """Get or create shared Playwright browser for headless scraping."""
+    """Get or create thread-local Playwright browser for headless scraping."""
     from playwright.sync_api import sync_playwright
-    global _shared_browser, _pw_manager
-    with _browser_lock:
-        if _shared_browser is None or not _shared_browser.is_connected():
-            if _pw_manager is None:
-                _pw_manager = sync_playwright().start()
-            _shared_browser = _pw_manager.chromium.launch(headless=True)
-        return _shared_browser
+    global _all_thread_browsers, _all_thread_pw_managers
+    
+    if not hasattr(_thread_local, 'pw_manager') or _thread_local.pw_manager is None:
+        pw = sync_playwright().start()
+        _thread_local.pw_manager = pw
+        with _browser_lock:
+            _all_thread_pw_managers.append(pw)
+            
+    if not hasattr(_thread_local, 'browser') or _thread_local.browser is None or not _thread_local.browser.is_connected():
+        b = _thread_local.pw_manager.chromium.launch(headless=True)
+        _thread_local.browser = b
+        with _browser_lock:
+            _all_thread_browsers.append(b)
+            
+    return _thread_local.browser
 
 
 # ── Rating Platform Base ──────────────────────────────────
@@ -593,21 +602,22 @@ class ExpediaPlatform(RatingPlatform):
 # ── Shared browser pool management ────────────────────────
 
 def _close_headless_browser():
-    """Close the shared headless browser."""
-    global _shared_browser, _pw_manager
+    """Close all thread-local browsers and managers."""
+    global _all_thread_browsers, _all_thread_pw_managers
     with _browser_lock:
-        if _shared_browser:
+        for b in _all_thread_browsers:
             try:
-                _shared_browser.close()
+                b.close()
             except:
                 pass
-            _shared_browser = None
-        if _pw_manager:
+        _all_thread_browsers.clear()
+        
+        for pw in _all_thread_pw_managers:
             try:
-                _pw_manager.stop()
+                pw.stop()
             except:
                 pass
-            _pw_manager = None
+        _all_thread_pw_managers.clear()
 
 
 # ── Checkpoint system for auto-resume ──────────────────────
