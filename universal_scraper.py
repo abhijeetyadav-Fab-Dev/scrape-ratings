@@ -18,7 +18,7 @@ How to add a new source:
   4. Register it in EXTRANET_SOURCES
 """
 
-import os, csv, json, time, re, threading, subprocess, pickle
+import os, csv, json, time, re, threading, subprocess, pickle, sqlite3
 from pathlib import Path
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -26,7 +26,8 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QCheckBox, QGroupBox, QTextEdit, QProgressBar, QFileDialog,
-    QComboBox, QScrollArea, QFrame,
+    QComboBox, QScrollArea, QFrame, QTabWidget, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -2631,6 +2632,154 @@ class ScrapeJob:
 
 
 # ────────────────────────────────────────────────────────────
+#  SQLite-based Scrape History and Progress Auto-Save Manager
+# ────────────────────────────────────────────────────────────
+
+class ScrapeHistoryManager:
+    DB_PATH = COOKIES_DIR / "scrape_history.db"
+
+    @classmethod
+    def init_db(cls):
+        """Initialize the SQLite database schema."""
+        conn = sqlite3.connect(str(cls.DB_PATH))
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scrape_sessions (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT,
+                platform TEXT,
+                source_key TEXT,
+                fields TEXT,
+                output_path TEXT,
+                status TEXT,
+                total_properties INTEGER,
+                processed_properties INTEGER,
+                total_rows INTEGER
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scraped_properties (
+                session_id TEXT,
+                hotel_id TEXT,
+                hotel_name TEXT,
+                status TEXT,
+                rows_count INTEGER,
+                timestamp TEXT,
+                PRIMARY KEY (session_id, hotel_id)
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    @classmethod
+    def create_session(cls, session_id: str, platform: str, source_key: str, fields: list[dict], output_path: str):
+        cls.init_db()
+        conn = sqlite3.connect(str(cls.DB_PATH))
+        cursor = conn.cursor()
+        fields_json = json.dumps(fields)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+            INSERT OR REPLACE INTO scrape_sessions 
+            (id, timestamp, platform, source_key, fields, output_path, status, total_properties, processed_properties, total_rows)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, timestamp, platform, source_key, fields_json, output_path, "Running", 0, 0, 0))
+        conn.commit()
+        conn.close()
+
+    @classmethod
+    def update_session_counts(cls, session_id: str, total_properties: int):
+        conn = sqlite3.connect(str(cls.DB_PATH))
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE scrape_sessions 
+            SET total_properties = ?
+            WHERE id = ?
+        """, (total_properties, session_id))
+        conn.commit()
+        conn.close()
+
+    @classmethod
+    def add_scraped_property(cls, session_id: str, hotel_id: str, hotel_name: str, status: str, rows_count: int):
+        cls.init_db()
+        conn = sqlite3.connect(str(cls.DB_PATH))
+        cursor = conn.cursor()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+            INSERT OR REPLACE INTO scraped_properties 
+            (session_id, hotel_id, hotel_name, status, rows_count, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (session_id, hotel_id, hotel_name, status, rows_count, timestamp))
+        
+        # Update processed count and total rows in session
+        cursor.execute("""
+            SELECT COUNT(*), SUM(rows_count) FROM scraped_properties
+            WHERE session_id = ? AND (status = 'Completed' OR rows_count > 0)
+        """, (session_id,))
+        processed, total_rows = cursor.fetchone()
+        
+        cursor.execute("""
+            UPDATE scrape_sessions 
+            SET processed_properties = ?, total_rows = ?
+            WHERE id = ?
+        """, (processed or 0, total_rows or 0, session_id))
+        
+        conn.commit()
+        conn.close()
+
+    @classmethod
+    def complete_session(cls, session_id: str, status: str = "Completed"):
+        cls.init_db()
+        conn = sqlite3.connect(str(cls.DB_PATH))
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE scrape_sessions 
+            SET status = ?
+            WHERE id = ?
+        """, (status, session_id))
+        conn.commit()
+        conn.close()
+
+    @classmethod
+    def get_completed_properties(cls, session_id: str) -> set[str]:
+        """Get set of hotel_ids already successfully scraped in this session."""
+        cls.init_db()
+        conn = sqlite3.connect(str(cls.DB_PATH))
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT hotel_id FROM scraped_properties
+            WHERE session_id = ? AND status = 'Completed'
+        """, (session_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        return {r[0] for r in rows}
+
+    @classmethod
+    def get_session(cls, session_id: str) -> dict:
+        cls.init_db()
+        conn = sqlite3.connect(str(cls.DB_PATH))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM scrape_sessions WHERE id = ?", (session_id,))
+        row = cursor.fetchone()
+        result = dict(row) if row else {}
+        conn.close()
+        return result
+
+    @classmethod
+    def get_history(cls) -> list[dict]:
+        """Fetch all sessions ordered by timestamp descending."""
+        cls.init_db()
+        conn = sqlite3.connect(str(cls.DB_PATH))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM scrape_sessions ORDER BY timestamp DESC")
+        rows = cursor.fetchall()
+        result = [dict(r) for r in rows]
+        conn.close()
+        return result
+
+
+# ────────────────────────────────────────────────────────────
 #  Scrape engine (runs a job in a background thread)
 # ────────────────────────────────────────────────────────────
 
@@ -2640,11 +2789,13 @@ class ExtranetScrapeWorker(QThread):
     log_msg = pyqtSignal(str)
     login_required = pyqtSignal(str)
 
-    def __init__(self, job: ScrapeJob):
+    def __init__(self, job: ScrapeJob, session_id: str = None):
         super().__init__()
         self.job = job
         self._stop = False
         self.login_event = threading.Event()
+        self.session_id = session_id or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.is_resume = session_id is not None
 
     def stop(self):
         self._stop = True
@@ -2660,6 +2811,27 @@ class ExtranetScrapeWorker(QThread):
         output_path = self.job.output_path or str(
             Path.home() / "Downloads" / f"{self.job.label}.csv"
         )
+
+        # Initialize or update session in SQLite history
+        selected_field_keys = self.job.selected_fields
+        if not self.is_resume:
+            ScrapeHistoryManager.create_session(
+                self.session_id, source_name, self.job.source_key, selected_field_keys, output_path
+            )
+        else:
+            ScrapeHistoryManager.complete_session(self.session_id, "Running")
+
+        # Prepare CSV file and headers in real-time mode
+        field_keys = [f["key"] for f in self.job.selected_fields]
+        ordered_keys = field_keys + ["hotel_id", "hotel_name", "_source", "_error"]
+        
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        file_exists = os.path.exists(output_path) and os.path.getsize(output_path) > 0
+        if not file_exists:
+            with open(output_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(ordered_keys)
+
         self.log_msg.emit(f"Starting scrape from {source_name}")
         self.progress.emit(0, 1, "Launching browser...")
 
@@ -2677,6 +2849,10 @@ class ExtranetScrapeWorker(QThread):
                 ]
             )
             page = context.pages[0] if context.pages else context.new_page()
+            
+            # Pass outputs and session details to the source singleton
+            source.output_path = output_path
+            source.session_id = self.session_id
 
             # ── Login (if needed) ──────────────────────────
             cookies_path = source.cookies_path
@@ -2877,33 +3053,37 @@ class ExtranetScrapeWorker(QThread):
             context.close()
             pw.stop()
 
-            # ── Write output CSV ───────────────────────────
-            if all_rows:
-                field_keys = [f["key"] for f in self.job.selected_fields]
-                # Collect all column keys from all rows
-                all_keys = set()
-                for row in all_rows:
-                    all_keys.update(row.keys())
-                # Preferred order: selected fields first, then the rest
-                ordered_keys = field_keys + [k for k in all_keys if k not in field_keys]
-
-                with open(output_path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=ordered_keys)
-                    writer.writeheader()
-                    writer.writerows(all_rows)
-
-                self.log_msg.emit(f"\nDone! {len(all_rows)} total rows written to:")
-                self.log_msg.emit(f"  {output_path}")
+            # ── Write output CSV (written in real-time) ───────────────────────────
+            if self._stop:
+                ScrapeHistoryManager.complete_session(self.session_id, "Interrupted")
+                self.log_msg.emit("\nScrape job stopped/interrupted by user.")
+                self.finished.emit(output_path, 0)
+            elif all_rows:
+                ScrapeHistoryManager.complete_session(self.session_id, "Completed")
+                self.log_msg.emit(f"\nDone! Scrape finished successfully.")
+                self.log_msg.emit(f"  Output saved to: {output_path}")
                 self.progress.emit(section_count, section_count, "Complete!")
                 self.finished.emit(output_path, len(all_rows))
             else:
-                self.log_msg.emit("No data extracted. Try adjusting the page or selectors.")
-                self.finished.emit("", 0)
+                # If no rows extracted but we didn't stop, check if there's data in the database
+                session_stats = ScrapeHistoryManager.get_session(self.session_id)
+                total_rows = session_stats.get("total_rows", 0) if session_stats else 0
+                if total_rows > 0:
+                    ScrapeHistoryManager.complete_session(self.session_id, "Completed")
+                    self.log_msg.emit(f"\nDone! Scrape finished successfully with {total_rows} total records.")
+                    self.log_msg.emit(f"  Output saved to: {output_path}")
+                    self.progress.emit(section_count, section_count, "Complete!")
+                    self.finished.emit(output_path, total_rows)
+                else:
+                    ScrapeHistoryManager.complete_session(self.session_id, "Completed")
+                    self.log_msg.emit("Scrape finished. No new active promotions or data extracted.")
+                    self.finished.emit(output_path, 0)
 
         except Exception as e:
             self.log_msg.emit(f"ERROR: {e}")
             import traceback
             self.log_msg.emit(traceback.format_exc())
+            ScrapeHistoryManager.complete_session(self.session_id, "Failed")
             self.finished.emit("", 0)
 
 
@@ -2925,6 +3105,7 @@ class UniversalScraperTab(QWidget):
         self.ui_signal.connect(lambda fn: fn())
         self._build_ui()
         self._refresh_source_fields()
+        self._load_history_into_table()
 
     def _append_log(self, msg: str):
         self.log.append(msg)
@@ -2932,19 +3113,44 @@ class UniversalScraperTab(QWidget):
         scrollbar.setValue(scrollbar.maximum())
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.sub_tabs = QTabWidget()
+        self.sub_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #333; background: #1a1a2e; }
+            QTabBar::tab { background: #0f3460; color: #aaa; padding: 10px 24px;
+                          margin-right: 2px; border-top-left-radius: 4px;
+                          border-top-right-radius: 4px; font-weight: bold; }
+            QTabBar::tab:selected { background: #16213e; color: #e94560; border-bottom: 2px solid #e94560; }
+            QTabBar::tab:hover { background: #1a3a6a; color: white; }
+        """)
+        main_layout.addWidget(self.sub_tabs)
+        
+        # ── Tab 1: Config ────────────────────────────────────
+        config_widget = QWidget()
+        self._build_config_ui(config_widget)
+        self.sub_tabs.addTab(config_widget, "Scraper Config")
+        
+        # ── Tab 2: History ───────────────────────────────────
+        history_widget = QWidget()
+        self._build_history_ui(history_widget)
+        self.sub_tabs.addTab(history_widget, "Scrape History & Resume")
+
+    def _build_config_ui(self, widget):
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
 
         # ── Header ────────────────────────────────────────
         title = QLabel("Universal Data Scraper")
-        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        title.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        subtitle = QLabel("Scrape any data from Booking.com Extranet, MMT Extranet, and more")
+        subtitle = QLabel("Configure and run targeted extranet scrapes")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("color: #888; font-size: 12px;")
+        subtitle.setStyleSheet("color: #888; font-size: 11px;")
         layout.addWidget(subtitle)
 
         # ── Source selector ────────────────────────────────
@@ -2978,7 +3184,7 @@ class UniversalScraperTab(QWidget):
         scroll_container = QWidget()
         self.fields_layout = QVBoxLayout(scroll_container)
         scroll.setWidget(scroll_container)
-        scroll.setMaximumHeight(300)
+        scroll.setMaximumHeight(260)
         layout.addWidget(QLabel("Select fields to scrape:"))
         layout.addWidget(scroll)
 
@@ -3029,7 +3235,7 @@ class UniversalScraperTab(QWidget):
 
         self.run_btn = QPushButton("▶  Start Scrape")
         self.run_btn.setStyleSheet("background-color: #27ae60; font-weight: bold; padding: 10px 24px;")
-        self.run_btn.clicked.connect(self._run_job)
+        self.run_btn.clicked.connect(lambda: self._run_job())
         run_row.addWidget(self.run_btn)
 
         self.stop_btn = QPushButton("■ Stop")
@@ -3047,7 +3253,7 @@ class UniversalScraperTab(QWidget):
         # ── Log ───────────────────────────────────────────
         self.log = QTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumHeight(180)
+        self.log.setMaximumHeight(150)
         self.log.setStyleSheet(
             "background-color: #16213e; color: #a0e0a0; border: 1px solid #333; "
             "border-radius: 4px; font-family: Consolas; font-size: 11px;"
@@ -3055,9 +3261,213 @@ class UniversalScraperTab(QWidget):
         layout.addWidget(QLabel("Log:"))
         layout.addWidget(self.log)
 
+    def _build_history_ui(self, widget):
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        # Title
+        hist_title = QLabel("Scrape Session History & Resume")
+        hist_title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        hist_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hist_title)
+
+        # Filters Row
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter by Month:"))
+        self.month_filter = QComboBox()
+        self.month_filter.addItem("All Months")
+        self.month_filter.currentIndexChanged.connect(self._load_history_into_table)
+        filter_row.addWidget(self.month_filter)
+
+        filter_row.addWidget(QLabel("Filter by Status:"))
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(["All Statuses", "Completed", "Running", "Interrupted", "Failed"])
+        self.status_filter.currentIndexChanged.connect(self._load_history_into_table)
+        filter_row.addWidget(self.status_filter)
+
+        filter_row.addStretch()
+
+        self.refresh_hist_btn = QPushButton("Refresh")
+        self.refresh_hist_btn.setStyleSheet("background-color: #2980b9; padding: 6px 14px;")
+        self.refresh_hist_btn.clicked.connect(self._load_history_into_table)
+        filter_row.addWidget(self.refresh_hist_btn)
+        layout.addLayout(filter_row)
+
+        # History Table
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(6)
+        self.history_table.setHorizontalHeaderLabels([
+            "Date & Time", "Platform", "Progress", "Records", "Status", "Actions"
+        ])
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.history_table.setStyleSheet("""
+            QTableWidget { background-color: #16213e; color: #e0e0e0; gridline-color: #333; border: 1px solid #333; }
+            QHeaderView::section { background-color: #0f3460; color: white; padding: 6px; border: 1px solid #333; font-weight: bold; }
+            QTableWidget::item { padding: 6px; }
+        """)
+        
+        # Set column widths/strech
+        header = self.history_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.history_table.setColumnWidth(1, 150)
+        self.history_table.setColumnWidth(2, 80)
+        self.history_table.setColumnWidth(3, 80)
+        self.history_table.setColumnWidth(4, 90)
+        
+        layout.addWidget(self.history_table)
+
+    def _load_history_into_table(self):
+        """Load, filter, and render history items from the SQLite database."""
+        history = ScrapeHistoryManager.get_history()
+        
+        # Populate month filter combo dynamically if not already filled
+        current_month_sel = self.month_filter.currentText()
+        self.month_filter.blockSignals(True)
+        self.month_filter.clear()
+        self.month_filter.addItem("All Months")
+        
+        months = set()
+        for h in history:
+            ts = h.get("timestamp", "")
+            if len(ts) >= 7:
+                year_month = ts[:7]
+                try:
+                    dt = datetime.strptime(year_month, "%Y-%m")
+                    months.add(dt.strftime("%B %Y"))
+                except Exception:
+                    months.add(year_month)
+                    
+        for m in sorted(list(months), reverse=True):
+            self.month_filter.addItem(m)
+            
+        idx = self.month_filter.findText(current_month_sel)
+        if idx >= 0:
+            self.month_filter.setCurrentIndex(idx)
+        self.month_filter.blockSignals(False)
+
+        # Apply filters
+        month_sel = self.month_filter.currentText()
+        status_sel = self.status_filter.currentText()
+        
+        filtered_history = []
+        for h in history:
+            if month_sel != "All Months":
+                ts = h.get("timestamp", "")
+                if len(ts) >= 7:
+                    try:
+                        dt = datetime.strptime(ts[:7], "%Y-%m")
+                        m_str = dt.strftime("%B %Y")
+                        if m_str != month_sel:
+                            continue
+                    except Exception:
+                        if ts[:7] != month_sel:
+                            continue
+                            
+            if status_sel != "All Statuses":
+                if h.get("status", "") != status_sel:
+                    continue
+                    
+            filtered_history.append(h)
+
+        self.history_table.setRowCount(0)
+        self.history_table.setRowCount(len(filtered_history))
+        
+        for row_idx, h in enumerate(filtered_history):
+            self.history_table.setItem(row_idx, 0, QTableWidgetItem(h.get("timestamp", "")))
+            self.history_table.setItem(row_idx, 1, QTableWidgetItem(h.get("platform", "")))
+            
+            total_p = h.get("total_properties", 0) or 0
+            proc_p = h.get("processed_properties", 0) or 0
+            progress_str = f"{proc_p} / {total_p}" if total_p > 0 else "1 / 1"
+            self.history_table.setItem(row_idx, 2, QTableWidgetItem(progress_str))
+            self.history_table.setItem(row_idx, 3, QTableWidgetItem(str(h.get("total_rows", 0))))
+            
+            status = h.get("status", "")
+            status_item = QTableWidgetItem(status)
+            if status == "Completed":
+                status_item.setForeground(Qt.GlobalColor.green)
+            elif status == "Running":
+                status_item.setForeground(Qt.GlobalColor.cyan)
+            elif status == "Interrupted":
+                status_item.setForeground(Qt.GlobalColor.yellow)
+            elif status == "Failed":
+                status_item.setForeground(Qt.GlobalColor.red)
+            self.history_table.setItem(row_idx, 4, status_item)
+            
+            # Actions cell
+            actions_layout = QHBoxLayout()
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            actions_layout.setSpacing(6)
+            
+            open_btn = QPushButton("Open CSV")
+            open_btn.setStyleSheet("background-color: #27ae60; font-size: 11px; padding: 4px 8px;")
+            out_path = h.get("output_path", "")
+            open_btn.clicked.connect(lambda checked, p=out_path: self._open_csv_file(p))
+            actions_layout.addWidget(open_btn)
+            
+            resume_btn = QPushButton("Resume")
+            resume_btn.setStyleSheet("background-color: #d35400; font-size: 11px; padding: 4px 8px;")
+            session_id = h.get("id", "")
+            
+            # Can resume if running/interrupted/failed and there are properties remaining to scrape
+            can_resume = status in ("Interrupted", "Failed", "Running") and total_p > proc_p
+            resume_btn.setEnabled(can_resume)
+            if not can_resume:
+                resume_btn.setStyleSheet("background-color: #333; color: #666; font-size: 11px; padding: 4px 8px;")
+                
+            resume_btn.clicked.connect(lambda checked, s_id=session_id: self._resume_session(s_id))
+            actions_layout.addWidget(resume_btn)
+            
+            cell_widget = QWidget()
+            cell_widget.setLayout(actions_layout)
+            self.history_table.setCellWidget(row_idx, 5, cell_widget)
+
+    def _open_csv_file(self, output_path: str):
+        if not output_path or not os.path.exists(output_path):
+            self.log_msg(f"Error: CSV file not found at {output_path}")
+            return
+        try:
+            os.startfile(output_path)
+            self.log_msg(f"Opened file: {output_path}")
+        except Exception as e:
+            self.log_msg(f"Failed to open CSV file: {e}")
+
+    def _resume_session(self, session_id: str):
+        session = ScrapeHistoryManager.get_session(session_id)
+        if not session:
+            self.log_msg("Error: Session not found in database.")
+            return
+            
+        output_path = session.get("output_path", "")
+        source_key = session.get("source_key", "")
+        fields_str = session.get("fields", "[]")
+        
+        try:
+            fields = json.loads(fields_str)
+        except Exception:
+            self.log_msg("Error: Failed to parse fields configuration for this session.")
+            return
+            
+        label = session_id.replace("session_", "")
+        job = ScrapeJob(
+            source_key=source_key,
+            selected_fields=fields,
+            label=label,
+            output_path=output_path
+        )
+        
+        self.sub_tabs.setCurrentIndex(0)
+        self._run_job(job, session_id=session_id)
+
     def _refresh_source_fields(self):
         """Rebuild the field checklist for the currently selected source."""
-        # Clear existing checkboxes
         while self.fields_layout.count():
             item = self.fields_layout.takeAt(0)
             if item.widget():
@@ -3068,10 +3478,8 @@ class UniversalScraperTab(QWidget):
         if not source:
             return
 
-        # Update session status
         self._update_session_status()
 
-        # Build group boxes for each field group
         for group_def in source.available_fields:
             group_box = QGroupBox(group_def["group"])
             group_box.setStyleSheet("""
@@ -3153,7 +3561,6 @@ class UniversalScraperTab(QWidget):
         threading.Thread(target=login_thread, daemon=True).start()
 
     def _show_confirm_login_button(self):
-        """Switch the Login button to 'Confirm Login' mode."""
         self._login_mode = "confirm"
         self.login_btn.setText("Click here after logging in → Confirm")
         self.login_btn.setStyleSheet(
@@ -3162,7 +3569,6 @@ class UniversalScraperTab(QWidget):
         self.login_btn.setEnabled(True)
 
     def _confirm_login(self):
-        """User clicked Confirm — signal the login thread to save cookies."""
         self._login_mode = "login"
         if hasattr(self, '_login_event') and self._login_event:
             self._login_event.set()
@@ -3170,7 +3576,6 @@ class UniversalScraperTab(QWidget):
         self.login_btn.setText("Saving session...")
 
     def _reset_login_button(self):
-        """Restore the button to its default state."""
         self._login_mode = "login"
         self.login_btn.setText("Login")
         self.login_btn.setStyleSheet("background-color: #0a7; padding: 8px 16px;")
@@ -3188,7 +3593,6 @@ class UniversalScraperTab(QWidget):
         self._set_all_checkboxes(False)
 
     def _scrape_all_data(self):
-        """Select ALL fields across all groups, then start the job immediately."""
         self._set_all_checkboxes(True)
         self.log_msg("All fields selected — starting scrape with all available data...")
         self._run_job()
@@ -3236,11 +3640,9 @@ class UniversalScraperTab(QWidget):
             return
         try:
             job = ScrapeJob.from_file(path)
-            # Select the source
             idx = self.source_combo.findData(job.source_key)
             if idx >= 0:
                 self.source_combo.setCurrentIndex(idx)
-            # Check matching fields
             for field in job.selected_fields:
                 for i in range(self.fields_layout.count()):
                     item = self.fields_layout.itemAt(i)
@@ -3252,27 +3654,31 @@ class UniversalScraperTab(QWidget):
         except Exception as e:
             self.log_msg(f"Failed to load config: {e}")
 
-    def _run_job(self):
-        source_key = self.source_combo.currentData()
-        fields = self._get_selected_fields()
-        if not fields:
-            self.log_msg("Select at least one field to scrape.")
-            return
+    def _run_job(self, job=None, session_id=None):
+        if job is None:
+            source_key = self.source_combo.currentData()
+            fields = self._get_selected_fields()
+            if not fields:
+                self.log_msg("Select at least one field to scrape.")
+                return
 
-        label = self.label_input.toPlainText().strip() or f"scrape_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        output_path = str(Path.home() / "Downloads" / f"{label}.csv")
+            label = self.label_input.toPlainText().strip() or f"scrape_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            output_path = str(Path.home() / "Downloads" / f"{label}.csv")
 
-        job = ScrapeJob(
-            source_key=source_key,
-            selected_fields=fields,
-            label=label,
-            output_path=output_path,
-        )
+            job = ScrapeJob(
+                source_key=source_key,
+                selected_fields=fields,
+                label=label,
+                output_path=output_path,
+            )
         self.current_job = job
 
         self.log_msg(f"\n{'='*50}")
-        self.log_msg(f"Job: {job.display_summary()}")
-        self.log_msg(f"Output: {output_path}")
+        if session_id:
+            self.log_msg(f"Resuming Job: {job.display_summary()}")
+        else:
+            self.log_msg(f"Job: {job.display_summary()}")
+        self.log_msg(f"Output: {job.output_path}")
         self.log_msg(f"{'='*50}")
 
         self.run_btn.setEnabled(False)
@@ -3281,7 +3687,7 @@ class UniversalScraperTab(QWidget):
         self.progress.setMaximum(1)
         self.progress.setValue(0)
 
-        self.worker = ExtranetScrapeWorker(job)
+        self.worker = ExtranetScrapeWorker(job, session_id=session_id)
         self.worker.progress.connect(self._on_worker_progress)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.log_msg.connect(self.log_msg)
@@ -3302,7 +3708,8 @@ class UniversalScraperTab(QWidget):
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._reset_login_button()
-        if output_path and rows > 0:
+        if output_path and rows >= 0:
+            self._load_history_into_table()
             self.log_msg(f"\n✓ Complete! {rows} rows → {output_path}")
             self.progress.setFormat(f"Done! {rows} rows")
         else:
@@ -3314,9 +3721,6 @@ class UniversalScraperTab(QWidget):
             pass
 
     def _on_worker_login_required(self, message: str):
-        """Called when the worker needs the user to log in (no saved session).
-        Switches the Login button to in-app confirm mode instead of a popup.
-        """
         self.log_msg(message)
         self.log_msg("Chrome opened — log in to the browser window, then click Confirm Login below.")
         self.login_btn.setText("Click here after logging in → Confirm (Worker)")
@@ -3327,10 +3731,8 @@ class UniversalScraperTab(QWidget):
         self._login_mode = "worker_confirm"
 
     def _confirm_worker_login(self):
-        """User clicked Confirm during a worker job — unblock the worker's login_event."""
         if self.worker and hasattr(self.worker, 'login_event'):
             self.worker.login_event.set()
-        # Keep button disabled showing scrape status - worker is still running
         self._login_mode = "login"
         self.login_btn.setText("Scraping in progress...")
         self.login_btn.setStyleSheet(
