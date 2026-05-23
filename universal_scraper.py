@@ -174,6 +174,11 @@ class ExtranetSource(ABC):
         """Extract fields from data tables with column header matching.
         known_columns maps lowercase column header patterns → field keys.
         """
+        # First, check if the page is an error page
+        is_error, error_context = self._is_error_page(page)
+        if is_error:
+            return [{"_error": error_context, "_source": "error_detected"}]
+
         rows = []
         try:
             tables = page.query_selector_all("table")
@@ -260,8 +265,48 @@ class ExtranetSource(ABC):
             rows.append(row)
         return rows
 
+
+    def _is_error_page(self, page) -> tuple[bool, str]:
+        """Detect if the page is showing an error, login page, or is not a valid data page.
+        Returns (is_error, error_context).
+        """
+        error_indicators = [
+            "sorry, this page does not exist",
+            "sorry, this page isn't working",
+            "page not found",
+            "404 not found",
+            "access denied",
+            "you are not authorized",
+            "please sign in",
+            "sign in to continue",
+            "session expired",
+        ]
+        try:
+            url = page.url
+            title = (page.evaluate("document.title") or "").lower()
+            body_text = ""
+            body = page.query_selector("body")
+            if body:
+                body_text = body.inner_text()[:2000].lower()
+
+            for indicator in error_indicators:
+                if indicator in body_text or indicator in title:
+                    return True, f"Error page: '{indicator}' at {url}"
+
+            if body_text and len(body_text.strip()) < 150:
+                return True, f"Page too short ({len(body_text.strip())} chars) at {url}"
+        except Exception:
+            pass
+        return False, ""
+
     def _generic_fallback(self, page) -> list[dict]:
-        """Final fallback: try tables → list items → body text."""
+        """Final fallback: try tables → list items → body text.
+        Checks for error pages first and returns meaningful context instead of raw error text."""
+        # First, check if the page is an error page
+        is_error, error_context = self._is_error_page(page)
+        if is_error:
+            return [{"_error": error_context, "_source": "error_detected"}]
+
         rows = []
         try:
             tables = page.query_selector_all("table")
@@ -298,7 +343,12 @@ class ExtranetSource(ABC):
             try:
                 body = page.query_selector("body")
                 if body:
-                    rows.append({"raw_page_text": body.inner_text()[:5000]})
+                    body_text = body.inner_text()[:5000]
+                    if len(body_text.strip()) >= 150:
+                        rows.append({"raw_page_text": body_text})
+                    else:
+                        rows.append({"_error": f"No meaningful data (page has {len(body_text.strip())} chars)",
+                                     "_source": "empty_page"})
             except Exception:
                 pass
         return rows
@@ -514,60 +564,6 @@ class BookingExtranetSource(ExtranetSource):
                 return prefix_map[prefix]
         return "general"
 
-    def _try_selectors(self, page, selectors: list[str]) -> str:
-        """Try each CSS selector and return first non-empty inner_text."""
-        for sel in selectors:
-            try:
-                el = page.query_selector(sel)
-                if el:
-                    text = el.inner_text().strip()
-                    if text:
-                        return text
-            except Exception:
-                continue
-        return ""
-
-    def _extract_value_by_label(self, page, label_text: str) -> str:
-        """Find a form field by its associated label text.
-        Uses a single page.evaluate call to handle all patterns:
-        for= attribute, next sibling, parent's next sibling.
-        """
-        try:
-            return page.evaluate(
-                """(text) => {
-                    const labels = document.querySelectorAll('label');
-                    for (const label of labels) {
-                        if (!label.textContent.includes(text)) continue;
-                        // 1. Check 'for' attribute → target element
-                        const forAttr = label.getAttribute('for');
-                        if (forAttr) {
-                            const el = document.getElementById(forAttr);
-                            if (el) {
-                                const val = el.value || el.textContent || '';
-                                if (val.trim()) return val.trim();
-                            }
-                        }
-                        // 2. Next sibling
-                        const sibling = label.nextElementSibling;
-                        if (sibling) {
-                            const txt = sibling.textContent || '';
-                            if (txt.trim()) return txt.trim();
-                        }
-                        // 3. Parent's next sibling
-                        const parent = label.parentElement;
-                        if (parent && parent.nextElementSibling) {
-                            const txt = parent.nextElementSibling.textContent || '';
-                            if (txt.trim()) return txt.trim();
-                        }
-                    }
-                    return '';
-                }""",
-                label_text
-            )
-        except Exception:
-            pass
-        return ""
-
     def _extract_property_fields(self, page, field_keys: list[str]) -> dict:
         """Extract Property Details fields from the Booking.com extranet property page."""
         row = {}
@@ -743,49 +739,6 @@ class BookingExtranetSource(ExtranetSource):
 
         if row:
             rows.append(row)
-        return rows
-
-    def _extract_table_fields(self, page, field_keys: list[str],
-                               known_columns: dict[str, str] = None) -> list[dict]:
-        """Extract fields from data tables with column header matching.
-        known_columns maps lowercase column header patterns → field keys.
-        """
-        rows = []
-        try:
-            tables = page.query_selector_all("table")
-            for table in tables:
-                header_els = table.query_selector_all("th")
-                headers = [h.inner_text().strip().lower() for h in header_els]
-                if not headers:
-                    continue
-
-                # Build a map: index → field_key for matching columns
-                col_map = {}
-                if known_columns:
-                    for i, hdr in enumerate(headers):
-                        for pattern, fk in known_columns.items():
-                            if pattern in hdr and fk in field_keys:
-                                col_map[i] = fk
-
-                body_rows = table.query_selector_all("tbody tr, tr:not(:has(th))")
-                for tr in body_rows:
-                    cells = tr.query_selector_all("td")
-                    row = {}
-                    if col_map:
-                        # Only collect mapped columns
-                        for i, cell in enumerate(cells):
-                            if i in col_map:
-                                row[col_map[i]] = cell.inner_text().strip()
-                    else:
-                        # No column map — collect all as raw_*
-                        for i, cell in enumerate(cells):
-                            if i < len(headers):
-                                key = f"raw_{headers[i].replace(' ', '_')}"
-                                row[key] = cell.inner_text().strip()
-                    if row:
-                        rows.append(row)
-        except Exception:
-            pass
         return rows
 
     def _extract_review_fields(self, page, field_keys: list[str]) -> list[dict]:
@@ -1077,46 +1030,8 @@ class BookingExtranetSource(ExtranetSource):
             if rows:
                 return rows
 
-        # ── Generic fallback (tables → list items → body text) ─
-        rows = []
-        try:
-            tables = page.query_selector_all("table")
-            if tables:
-                for table in tables:
-                    headers = [h.inner_text().strip().lower() for h in
-                               table.query_selector_all("th")]
-                    if not headers:
-                        continue
-                    body_rows = table.query_selector_all("tbody tr")
-                    for tr in body_rows:
-                        cells = tr.query_selector_all("td")
-                        row = {}
-                        for i, cell in enumerate(cells):
-                            if i < len(headers):
-                                key = f"raw_{headers[i].replace(' ', '_')}"
-                                row[key] = cell.inner_text().strip()
-                        if row:
-                            rows.append(row)
-        except Exception:
-            pass
-
-        if not rows:
-            try:
-                items = page.query_selector_all("[data-booking-id], .booking-item, .reservation-card")
-                for item in items:
-                    rows.append({"raw_data": item.inner_text().strip()})
-            except Exception:
-                pass
-
-        if not rows:
-            try:
-                body = page.query_selector("body")
-                if body:
-                    rows.append({"raw_page_text": body.inner_text()[:5000]})
-            except Exception:
-                pass
-
-        return rows
+        # ── Generic fallback (inherited from ExtranetSource) ─
+        return self._generic_fallback(page)
 
 
 # ────────────────────────────────────────────────────────────

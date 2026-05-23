@@ -19,6 +19,43 @@ COOKIES_DIR.mkdir(exist_ok=True)
 MMT_COOKIES = COOKIES_DIR / "mmt_cookies.pkl"
 
 
+# ── Shared Playwright browser (pool) ─────────────────────────
+
+_browser_pool_lock = threading.Lock()
+_browser_pool = None
+_pw_manager = None
+
+
+def get_shared_browser():
+    """Get or create a shared Playwright browser instance.
+    All Booking.com scrapes reuse this browser instead of launching a new one each time.
+    """
+    global _browser_pool, _pw_manager
+    with _browser_pool_lock:
+        if _browser_pool is None or not _browser_pool.is_connected():
+            if _pw_manager is None:
+                _pw_manager = sync_playwright().start()
+            _browser_pool = _pw_manager.chromium.launch(headless=True)
+        return _browser_pool
+
+
+def close_shared_browser():
+    global _browser_pool, _pw_manager
+    with _browser_pool_lock:
+        if _browser_pool:
+            try:
+                _browser_pool.close()
+            except:
+                pass
+            _browser_pool = None
+        if _pw_manager:
+            try:
+                _pw_manager.stop()
+            except:
+                pass
+            _pw_manager = None
+
+
 def clean_booking_url(url):
     match = re.match(r'(https://www\.booking\.com/hotel/[^?;]+)', url)
     return match.group(1) if match else url
@@ -26,12 +63,13 @@ def clean_booking_url(url):
 
 def search_booking_hotel(page, hotel_name, city=""):
     query = f"{hotel_name} {city}".strip()
-    # Remove special chars that break search
     query = re.sub(r'[^\w\s]', ' ', query).strip()
     search_url = f"https://www.booking.com/searchresults.en-gb.html?ss={query.replace(' ', '+')}"
     page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
-    time.sleep(4)
-    # Get first hotel link from results
+    try:
+        page.wait_for_selector('a[href*="/hotel/"]', timeout=8000)
+    except:
+        pass
     links = page.query_selector_all('a[href*="/hotel/"]')
     for link in links[:5]:
         href = link.get_attribute('href')
@@ -40,37 +78,89 @@ def search_booking_hotel(page, hotel_name, city=""):
     return None
 
 
+def _extract_rating_review_count(content):
+    """Extract rating and review count from page HTML content.
+    Uses multiple patterns to handle different Booking.com page layouts.
+    """
+    rating, review_count = None, None
+
+    # Rating patterns (on a 1-10 scale)
+    rating_patterns = [
+        r'"ratingValue"[\s:]*"?(\d+\.?\d*)',
+        r'ratingValue[\s:>]+(\d+\.?\d*)',
+        r'Scored\s+(\d+\.?\d*)',
+        r'"score"[\s:]+(\d+\.?\d*)',
+        r'review_score[\s:=]+(\d+\.?\d*)',
+        r'"averageScore"[\s:]+(\d+\.?\d*)',
+        r'(\d+\.\d)\s*/\s*10',
+        r'"reviewScore">(\d+\.?\d*)<',
+        r'<strong[^>]*>(\d+\.\d)</strong>',
+    ]
+    for pat in rating_patterns:
+        m = re.search(pat, content, re.IGNORECASE)
+        if m:
+            try:
+                val = float(m.group(1))
+                if 1 <= val <= 10:
+                    rating = str(val)
+                    break
+            except ValueError:
+                continue
+
+    # Review count patterns
+    count_patterns = [
+        r'"reviewCount"[\s:]*"?(\d+)',
+        r'"numberOfReviews"[\s:]+(\d+)',
+        r'([\d,]+)\s*reviews?',
+        r'([\d,]+)\s*ratings?',
+        r'"reviewCount">(\d+)<',
+    ]
+    for pat in count_patterns:
+        m = re.search(pat, content, re.IGNORECASE)
+        if m:
+            review_count = m.group(1).replace(",", "")
+            try:
+                if int(review_count) > 0:
+                    break
+            except ValueError:
+                review_count = None
+
+    return rating, review_count
+
+
+def _new_booking_page():
+    """Create a new page from the shared browser with standard headers."""
+    browser = get_shared_browser()
+    page = browser.new_page()
+    page.set_extra_http_headers({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
+    return page
+
+
 def scrape_hotel(url):
     rating, review_count = None, None
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9"
-            })
-            clean_url = clean_booking_url(url)
-            page.goto(clean_url, timeout=20000, wait_until="domcontentloaded")
-            time.sleep(3)
-            if '/hotel/' not in page.url:
-                browser.close()
-                return None, None
-            content = page.content()
-            for pat in [r'"ratingValue"[:\\s]*"?(\\d+\\.?\\d*)', r'Scored\\s+(\\d+\\.?\\d*)', r'"score":(\\d+\\.?\\d*)']:
-                m = re.search(pat, content)
-                if m:
-                    val = float(m.group(1))
-                    if 1 <= val <= 10:
-                        rating = str(val)
-                        break
-            for pat in [r'"reviewCount"[:\\s]*"?(\\d+)', r'([\\d,]+)\\s*reviews?']:
-                m = re.search(pat, content, re.IGNORECASE)
-                if m:
-                    review_count = m.group(1).replace(",", "")
-                    if int(review_count) > 0:
-                        break
-            browser.close()
+        page = _new_booking_page()
+        clean_url = clean_booking_url(url)
+        try:
+            page.goto(clean_url, timeout=25000, wait_until="domcontentloaded")
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except:
+            pass
+        if '/hotel/' not in page.url:
+            page.close()
+            return None, None
+        page.evaluate("window.scrollBy(0, 500)")
+        try:
+            page.wait_for_timeout(800)
+        except:
+            pass
+        content = page.content()
+        rating, review_count = _extract_rating_review_count(content)
+        page.close()
     except:
         pass
     return rating, review_count
@@ -78,82 +168,36 @@ def scrape_hotel(url):
 
 def search_and_scrape(hotel_name, city=""):
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9"
-            })
-            url = search_booking_hotel(page, hotel_name, city)
-            if not url:
-                browser.close()
-                return None, None, None
-            if url.startswith('/'):
-                url = "https://www.booking.com" + url
-            clean_url = clean_booking_url(url)
-            page.goto(clean_url, timeout=20000, wait_until="domcontentloaded")
-            time.sleep(4)
-            if '/hotel/' not in page.url:
-                browser.close()
-                return None, None, clean_url
-            content = page.content()
-            rating, review_count = None, None
-            for pat in [r'"ratingValue"[:\\s]*"?(\\d+\\.?\\d*)', r'Scored\\s+(\\d+\\.?\\d*)', r'"score":(\\d+\\.?\\d*)']:
-                m = re.search(pat, content)
-                if m:
-                    val = float(m.group(1))
-                    if 1 <= val <= 10:
-                        rating = str(val)
-                        break
-            for pat in [r'"reviewCount"[:\\s]*"?(\\d+)', r'([\\d,]+)\\s*reviews?']:
-                m = re.search(pat, content, re.IGNORECASE)
-                if m:
-                    review_count = m.group(1).replace(",", "")
-                    if int(review_count) > 0:
-                        break
-            browser.close()
-            return rating, review_count, clean_url
+        page = _new_booking_page()
+        url = search_booking_hotel(page, hotel_name, city)
+        if not url:
+            page.close()
+            return None, None, None
+        if url.startswith('/'):
+            url = "https://www.booking.com" + url
+        clean_url = clean_booking_url(url)
+        try:
+            page.goto(clean_url, timeout=25000, wait_until="domcontentloaded")
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except:
+            pass
+        if '/hotel/' not in page.url:
+            page.close()
+            return None, None, clean_url
+        page.evaluate("window.scrollBy(0, 500)")
+        try:
+            page.wait_for_timeout(800)
+        except:
+            pass
+        content = page.content()
+        rating, review_count = _extract_rating_review_count(content)
+        page.close()
+        return rating, review_count, clean_url
     except:
         return None, None, None
 
 
-def scrape_via_google(query):
-    """For MMT and other OTAs that block scraping, use Google to find rating info"""
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            })
-            # Extract hotel ID or name from URL for Google search
-            hotel_name = query
-            if 'makemytrip.com' in query:
-                # Try to get hotelId from URL
-                m = re.search(r'hotelId=(\\w+)', query)
-                if m:
-                    hotel_name = f"makemytrip hotel {m.group(1)} rating reviews"
-            search_url = f"https://www.google.com/search?q={hotel_name.replace(' ', '+')}"
-            page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
-            time.sleep(2)
-            content = page.content()
-            rating, review_count = None, None
-            # Google often shows rating in structured data
-            m = re.search(r'(\\d\\.\\d)\\s*/\\s*5', content)
-            if m:
-                rating = str(round(float(m.group(1)) * 2, 1))  # Convert /5 to /10
-            if not rating:
-                m = re.search(r'(\\d+\\.?\\d*)\\s*/\\s*10', content)
-                if m:
-                    rating = m.group(1)
-            m = re.search(r'([\\d,]+)\\s*(?:reviews?|ratings?)', content, re.IGNORECASE)
-            if m:
-                review_count = m.group(1).replace(",", "")
-            browser.close()
-            return rating, review_count
-    except:
-        return None, None
+
 
 
 def mmt_login():
@@ -224,6 +268,7 @@ def mmt_has_session():
 
 
 _mmt_browser = None
+_mmt_pw_manager = None  # Track Playwright manager so we can clean it up
 _mmt_lock = threading.Lock()
 MMT_DEBUG_PORT = 9222
 
@@ -276,14 +321,54 @@ def clear_checkpoint(input_file):
 
 
 
+def _kill_chrome_on_port(port):
+    """Kill any Chrome process listening on the given port."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano", "|", "findstr", f":{port}"],
+            capture_output=True, text=True, shell=True, timeout=5
+        )
+        for line in result.stdout.split("\n"):
+            parts = line.strip().split()
+            if len(parts) >= 5 and "LISTENING" in line:
+                pid = parts[-1]
+                try:
+                    subprocess.run(["taskkill", "/F", "/PID", pid],
+                                   capture_output=True, timeout=5)
+                except:
+                    pass
+    except:
+        pass
+    time.sleep(1)
+
+
 def _start_mmt_chrome():
-    """Launch real Chrome with debug port for MMT scraping"""
-    global _mmt_browser
+    """Kill old Chrome on debug port, then launch fresh Chrome for MMT scraping"""
+    global _mmt_browser, _mmt_pw_manager
+
+    # Kill any existing Chrome on our debug port
+    _kill_chrome_on_port(MMT_DEBUG_PORT)
+
+    # Close any stale Playwright browser reference and manager
+    if _mmt_browser:
+        try:
+            _mmt_browser.close()
+        except:
+            pass
+        _mmt_browser = None
+    if _mmt_pw_manager:
+        try:
+            _mmt_pw_manager.stop()
+        except:
+            pass
+        _mmt_pw_manager = None
+
     import subprocess
     chrome_paths = [
-        r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe"),
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
     ]
     chrome = None
     for p in chrome_paths:
@@ -302,8 +387,9 @@ def _start_mmt_chrome():
         "--window-size=1280,800",
         "about:blank"
     ])
-    time.sleep(4)
+    time.sleep(3)
     pw = sync_playwright().start()
+    _mmt_pw_manager = pw
     _mmt_browser = pw.chromium.connect_over_cdp(f"http://localhost:{MMT_DEBUG_PORT}")
     # Load cookies into the Chrome context
     context = _mmt_browser.contexts[0]
@@ -337,26 +423,46 @@ def scrape_mmt_hotel(hotel_id):
             page.goto(url, timeout=20000, wait_until="domcontentloaded")
         except:
             pass
-        time.sleep(3)
+        try:
+            page.wait_for_timeout(1000)
+        except:
+            pass
         page.evaluate("window.scrollBy(0, 1000)")
-        time.sleep(2)
+        try:
+            page.wait_for_timeout(800)
+        except:
+            pass
 
         content = page.content()
         rating, review_count = None, None
 
         if len(content) > 500:
-            for pat in [r'itemprop="ratingValue"[^>]*>(\\d+\\.?\\d*)<', r'"ratingValue"\\s*:\\s*"?(\\d+\\.?\\d*)"?', r'"userRating"\\s*:\\s*"?(\\d+\\.?\\d*)"?', r'"overallRating"\\s*:\\s*"?(\\d+\\.?\\d*)"?']:
+            # Rating patterns for MMT (on a 1-5 scale)
+            for pat in [
+                r'itemprop="ratingValue"[^>]*>(\d+\.?\d*)<',
+                r'"ratingValue"\s*:\s*"?(\d+\.?\d*)"?',
+                r'"userRating"\s*:\s*"?(\d+\.?\d*)"?',
+                r'"overallRating"\s*:\s*"?(\d+\.?\d*)"?',
+                r'(\d\.\d)\s*/\s*5',
+            ]:
                 matches = re.findall(pat, content)
                 valid = [x for x in matches if 1 <= float(x) <= 5]
                 if valid:
                     rating = valid[0]
                     break
 
-            for pat in [r'\\((\\d+)\\s*RATINGS?\\)', r'(\\d+)\\s*Ratings', r'"reviewCount"\\s*:\\s*"?(\\d+)"?', r'"ratingCount"\\s*:\\s*"?(\\d+)"?']:
+            # Review count patterns for MMT
+            for pat in [
+                r'\((\d+)\s*RATINGS?\)',
+                r'(\d+)\s*Ratings',
+                r'"reviewCount"\s*:\s*"?(\d+)"?',
+                r'"ratingCount"\s*:\s*"?(\d+)"?',
+                r'([\d,]+)\s*(?:rating|review)s?',
+            ]:
                 matches = re.findall(pat, content, re.IGNORECASE)
-                valid = [x for x in matches if int(x) > 0]
+                valid = [x for x in matches if x.replace(',', '').isdigit() and int(x.replace(',', '')) > 0]
                 if valid:
-                    review_count = valid[0]
+                    review_count = valid[0].replace(',', '')
                     break
 
         page.close()
@@ -462,7 +568,7 @@ class ScrapeWorker(QThread):
                 if source == 'mmt' and hotel_id:
                     rating, review_count = scrape_mmt_hotel(hotel_id)
                 elif url and 'makemytrip' in url:
-                    m = re.search(r'hotelId=(\\w+)', url)
+                    m = re.search(r'hotelId=(\w+)', url)
                     if m:
                         rating, review_count = scrape_mmt_hotel(m.group(1))
                     else:
@@ -755,7 +861,7 @@ class MainWindow(QMainWindow):
                 return query, rating, review_count, "booking"
             elif 'http' in query and 'makemytrip' in query:
                 # Extract hotelId from MMT link
-                m = re.search(r'hotelId=(\\w+)', query)
+                m = re.search(r'hotelId=(\w+)', query)
                 if m and mmt_has_session():
                     hotel_id = m.group(1)
                     rating, review_count = scrape_mmt_hotel(hotel_id)
@@ -836,7 +942,8 @@ class MainWindow(QMainWindow):
             name_idx = find_col('name', 'hotel')
             city_idx = find_col('city', 'location')
             link_idx = find_col('mmt', 'link', 'url')
-            id_idx = find_col('front-end id', 'mmt id', 'fh', 'hotel id', 'hotel_id', 'id')
+            # Be specific: only match columns that contain BOTH 'hotel' and 'id' or specific known names
+            id_idx = find_col('front-end id', 'mmt id', 'fh', 'hotel id', 'hotel_id')
 
             # If link_idx points to a column header that's also "MMT" but is the link column,
             # check which column actually has URLs in the data
@@ -864,7 +971,7 @@ class MainWindow(QMainWindow):
                 self.original_rows.append(row)
 
                 if url and 'makemytrip' in url:
-                    m = re.search(r'hotelId=(\\w+)', url)
+                    m = re.search(r'hotelId=(\w+)', url)
                     hid = m.group(1) if m else hotel_id
                     self.items.append({'name': name, 'city': city, 'url': url, 'source': 'mmt', 'hotel_id': hid})
                 elif url and 'booking.com' in url:
@@ -889,7 +996,7 @@ class MainWindow(QMainWindow):
             self.items = []
             for line in lines:
                 if 'makemytrip' in line:
-                    m = re.search(r'hotelId=(\\w+)', line)
+                    m = re.search(r'hotelId=(\w+)', line)
                     hotel_id = m.group(1) if m else ''
                     self.items.append({'name': line[:50], 'city': '', 'url': line, 'source': 'mmt', 'hotel_id': hotel_id})
                 elif 'booking.com' in line:
