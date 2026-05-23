@@ -2488,37 +2488,49 @@ class ExtranetScrapeWorker(QThread):
                 page.goto(source.login_url, timeout=30000, wait_until="domcontentloaded")
                 time.sleep(3)
                 # Check if session is still valid.
-                # Primary signal: URL changed from login_url → server redirected to dashboard.
-                # (More reliable than body text heuristics — avoids false positives from
-                # generic words like "sign in" or "password" appearing in footers/help text.)
-                current_url = page.url.rstrip('/').lower()
-                login_url_clean = source.login_url.rstrip('/').lower()
-                if current_url != login_url_clean:
-                    # URL changed → redirect happened → session is active
+                # If we are on the login form, the page body will contain login elements,
+                # or the URL will contain '/login' or similar login patterns.
+                page.wait_for_timeout(2000) # Wait for redirects to settle
+                
+                body_text = ""
+                try:
+                    body_text = page.inner_text("body")[:2000].lower()
+                except Exception:
+                    pass
+                    
+                current_url = page.url.lower()
+                
+                login_indicators = [
+                    "sign in to manage",      # Booking.com
+                    "sign in with",           # Generic
+                    "log in to your",         # Generic
+                    "enter your password",    # Login form
+                    "forgot password",        # Login form
+                    "create your account",    # Booking.com signup
+                    "login-form",             # Form class
+                    "username",               # Input name
+                    "password",               # Input name
+                ]
+                
+                # Check if it matches login patterns in body or URL
+                is_login_page = any(ind in body_text for ind in login_indicators) or "login" in current_url
+                
+                # For Booking.com Specifically, a logged-in session URL must contain '/hotel/', '/extranet/', or '/dashboard/'
+                if "admin.booking.com" in current_url:
+                    if not any(x in current_url for x in ("/hotel/", "/extranet/", "/dashboard/")):
+                        is_login_page = True
+                
+                if not is_login_page:
                     self.log_msg.emit("Session active.")
                 else:
-                    # Still on the same URL — check body for actual login indicators
-                    # Use specific phrases that only appear on login forms, not dashboards
-                    body_preview = page.inner_text("body")[:500].lower()
-                    login_indicators = [
-                        "sign in to manage",      # Booking.com
-                        "sign in with",           # Generic
-                        "log in to your",         # Generic
-                        "enter your password",     # Login form
-                        "forgot password",         # Login form
-                        "create your account",     # Booking.com signup
-                    ]
-                    if any(ind in body_preview for ind in login_indicators):
-                        self.log_msg.emit("Session expired — re-login required.")
-                        self.login_required.emit(f"{source.source_name} session expired, please log in again.")
-                        self.log_msg.emit("Chrome opened — log in and confirm in the app.")
-                        self.login_event.wait()
-                        cookies = context.cookies()
-                        with open(cookies_path, "wb") as f:
-                            pickle.dump(cookies, f)
-                        self.log_msg.emit("Session refreshed.")
-                    else:
-                        self.log_msg.emit("Session active.")
+                    self.log_msg.emit("Session expired — re-login required.")
+                    self.login_required.emit(f"{source.source_name} session expired, please log in again.")
+                    self.log_msg.emit("Chrome opened — log in and confirm in the app.")
+                    self.login_event.wait()
+                    cookies = context.cookies()
+                    with open(cookies_path, "wb") as f:
+                        pickle.dump(cookies, f)
+                    self.log_msg.emit("Session refreshed.")
             else:
                 self.log_msg.emit(f"Navigating to {source.source_name} login page...")
                 page.goto(source.login_url, timeout=30000, wait_until="domcontentloaded")

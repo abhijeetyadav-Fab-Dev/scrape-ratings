@@ -31,6 +31,8 @@
 - Fixed critical **Playwright Threading/Greenlet switching crash** in `ratings_platforms.py` by implementing a robust **Thread-Local Browser Pool** using Python's `threading.local()`. This isolates browser and manager instances per thread, completely preventing greenlet collisions in parallel scraping, and automatically handles clean-up of all instances.
 - Improved header parsing logic in `ratings_tab.py` to prevent ID, Code, Link, or URL columns from being misidentified as the name column (`name_idx`) when proper hotel name columns are present. Expanded `id_idx` keyword boundaries to cover all spelling variations of `fhid`, `fh id`, `hotel code`, `code`, etc.
 - Fixed Playwright launch context crash in `universal_scraper.py` by restoring `launch_persistent_context` instead of `launch` when using `--user-data-dir` as an argument (which Playwright explicitly forbids).
+- Fixed Booking.com Extranet session validation bug in `universal_scraper.py` where a simple redirect check falsely verified system-redirects to the login form index.html as a successful login (active dashboard session). Implemented robust multi-indicator verification checking page DOM body text and checking if the URL actually contains expected path segments (`/hotel/`, `/extranet/`, `/dashboard/`).
+
 
 
 
