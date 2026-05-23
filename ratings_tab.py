@@ -745,7 +745,7 @@ class RatingsTab(QWidget):
             f"Done! {success}/{total} scraped -> {Path(output_path).name}"
         )
         threading.Thread(target=notify_complete, args=(
-            f"Scraping complete! {success}/{total} hotels done.\nClick Downloads to open."
+            f"Scraping complete! {success}/{total} hotels done.\nClick Downloads to open.",
         ), daemon=True).start()
 
     def do_mmt_login(self):
