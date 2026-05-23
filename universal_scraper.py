@@ -598,8 +598,8 @@ class BookingExtranetSource(ExtranetSource):
                     return props;
                 }""")
 
-            # Loop through paginated Group Homepage to collect all properties (up to 15 pages)
-            for page_num in range(1, 15):
+            # Loop through paginated Group Homepage to collect all properties (up to 1000 pages)
+            for page_num in range(1, 1000):
                 current_props = scan_current_page()
                 for p in current_props:
                     if not any(x["id"] == p["id"] for x in properties):
@@ -610,7 +610,8 @@ class BookingExtranetSource(ExtranetSource):
                 try:
                     next_btn = page.query_selector(
                         'a[class*="next"], button[class*="next"], [data-testid="pagination-next-button"], '
-                        '.bui-pagination__link[title*="Next"], .pagination__link--next'
+                        '.bui-pagination__link[title*="Next"], .pagination__link--next, '
+                        'button[aria-label*="Next"], a[aria-label*="Next"], [class*="pagination"] [class*="next"]'
                     )
                     if not next_btn:
                         buttons = page.query_selector_all('a, button, span')
@@ -622,6 +623,20 @@ class BookingExtranetSource(ExtranetSource):
                     pass
                 
                 if next_btn:
+                    # Check if next button is disabled (has disabled attribute or class)
+                    is_disabled = False
+                    try:
+                        is_disabled = page.evaluate("""(btn) => {
+                            return btn.hasAttribute('disabled') || 
+                                   btn.classList.contains('disabled') || 
+                                   btn.getAttribute('aria-disabled') === 'true' ||
+                                   btn.classList.contains('bui-pagination__item--disabled');
+                        }""", next_btn)
+                    except Exception:
+                        pass
+                    if is_disabled:
+                        break
+                        
                     try:
                         next_btn.click()
                         page.wait_for_timeout(3000) # Wait for page load to settle
@@ -1060,6 +1075,20 @@ class BookingExtranetSource(ExtranetSource):
         """Extract Promotions / Offers data."""
         rows = []
 
+        # Check if the page has an indicator of "no active promotions"
+        try:
+            body_text = page.inner_text("body").lower()
+            no_promo_indicators = [
+                "don't have any active promotions",
+                "no active promotions",
+                "no promotions running",
+                "you don't have any promotions",
+            ]
+            if any(ind in body_text for ind in no_promo_indicators):
+                return []
+        except Exception:
+            pass
+
         # Try table-based extraction first
         table_rows = self._extract_table_fields(page, field_keys, {
             "name": "promo_name", "promotion": "promo_name", "offer": "promo_name",
@@ -1073,18 +1102,59 @@ class BookingExtranetSource(ExtranetSource):
         if table_rows:
             return table_rows
 
-        # Fallback: parse promotion cards
+        # Fallback: parse promotion cards with a line classifier
         try:
             items = page.query_selector_all(
-                "[class*='promotion'], [class*='offer'], "
-                ".promo-card, .offer-card, [data-promo-id]"
+                ".promo-card, .offer-card, [data-promo-id], "
+                "[class*='promo-card'], [class*='offer-card'], [class*='promotion-card'], "
+                "div[class*='promo-row'], div[class*='offer-row']"
             )
             for item in items:
                 row = {}
-                full_text = item.inner_text()
+                full_text = item.inner_text().strip()
+                if not full_text or len(full_text) < 10:
+                    continue
                 lines = [l.strip() for l in full_text.split("\n") if l.strip()]
-                for key in field_keys:
-                    row[key] = full_text[:500]
+                
+                # Basic classification of lines
+                discount = ""
+                name = ""
+                dates = []
+                status = "Active"
+                conditions = ""
+                promo_type = "Standard"
+                
+                for idx, line in enumerate(lines):
+                    l_lower = line.lower()
+                    if "%" in line or any(curr in line for curr in ["$", "€", "£", "rs", "inr"]) or "off" in l_lower or "discount" in l_lower:
+                        discount = line
+                    elif "valid" in l_lower or "from" in l_lower or "to" in l_lower or any(m in l_lower for m in ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
+                        dates.append(line)
+                    elif "status" in l_lower or "ended" in l_lower or "inactive" in l_lower or "expired" in l_lower:
+                        status = line
+                    elif "terms" in l_lower or "condition" in l_lower or "min stay" in l_lower:
+                        conditions = line
+                    elif idx == 0:
+                        name = line
+                    elif idx == 1 and not name:
+                        name = line
+                        
+                # Map extracted variables to the requested field keys
+                row["promo_name"] = name or (lines[0] if lines else "Promotion")
+                row["promo_type"] = promo_type
+                row["promo_discount"] = discount or "No Discount"
+                if len(dates) >= 2:
+                    row["promo_valid_from"] = dates[0]
+                    row["promo_valid_to"] = dates[1]
+                elif len(dates) == 1:
+                    row["promo_valid_from"] = dates[0]
+                    row["promo_valid_to"] = dates[0]
+                else:
+                    row["promo_valid_from"] = "N/A"
+                    row["promo_valid_to"] = "N/A"
+                row["promo_conditions"] = conditions or "Standard terms"
+                row["promo_status"] = status
+                
                 if row:
                     rows.append(row)
         except Exception:
