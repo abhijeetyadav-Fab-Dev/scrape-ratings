@@ -253,7 +253,7 @@ class RatingsTab(QWidget):
 
         btn_row.addWidget(QLabel("Workers:"))
         self.worker_spin = QSpinBox()
-        self.worker_spin.setRange(1, 20)
+        self.worker_spin.setRange(1, 100)
         self.worker_spin.setValue(workers)
         self.worker_spin.setStyleSheet(
             "background: #16213e; color: white; border: 1px solid #333; padding: 4px;"
@@ -494,7 +494,7 @@ class RatingsTab(QWidget):
             name_idx = find_col('name', 'hotel')
             city_idx = find_col('city', 'location')
             link_idx = find_col('mmt', 'link', 'url')
-            id_idx = find_col('front-end id', 'mmt id', 'fh', 'hotel id', 'hotel_id')
+            id_idx = find_col('fhid', 'fh id', 'fh', 'front-end id', 'mmt id', 'hotel id', 'hotel_id')
 
             if link_idx is not None and header_idx + 1 < len(rows):
                 test_row = rows[header_idx + 1]
@@ -901,14 +901,54 @@ class ScrapeWorker(QThread):
         def save_incremental():
             with open(output_path + '.tmp', 'w', newline='', encoding='utf-8') as f:
                 if self.original_rows and self.original_headers:
-                    out_headers = self.original_headers + ['Scraped_Rating', 'Scraped_Reviews', 'Scraped_Source']
+                    new_cols = ['Scraped_Rating', 'Scraped_Reviews', 'Scraped_Source', 'Scraped_Fail_Reason']
+                    out_headers = list(self.original_headers)
+                    lower_orig = [h.lower() for h in self.original_headers]
+                    col_indices = {}
+                    
+                    for col in new_cols:
+                        try:
+                            col_indices[col] = lower_orig.index(col.lower())
+                        except ValueError:
+                            col_indices[col] = None
+                            
+                    for col in new_cols:
+                        if col_indices[col] is None:
+                            out_headers.append(col)
+                            
                     writer = csv.writer(f)
                     writer.writerow(out_headers)
                     for idx, orig_row in enumerate(self.original_rows):
                         r = results[idx] if idx < len(results) and results[idx] else {
-                            'rating': '', 'review_count': '', 'source': ''
+                            'rating': '', 'review_count': '', 'source': '', 'fail_reason': ''
                         }
-                        writer.writerow(orig_row + [r['rating'], r['review_count'], r['source']])
+                        out_row = list(orig_row)
+                        
+                        # Add rating
+                        if col_indices['Scraped_Rating'] is not None:
+                            out_row[col_indices['Scraped_Rating']] = r['rating']
+                        else:
+                            out_row.append(r['rating'])
+                            
+                        # Add reviews
+                        if col_indices['Scraped_Reviews'] is not None:
+                            out_row[col_indices['Scraped_Reviews']] = r['review_count']
+                        else:
+                            out_row.append(r['review_count'])
+                            
+                        # Add source
+                        if col_indices['Scraped_Source'] is not None:
+                            out_row[col_indices['Scraped_Source']] = r['source']
+                        else:
+                            out_row.append(r['source'])
+                            
+                        # Add fail_reason
+                        if col_indices['Scraped_Fail_Reason'] is not None:
+                            out_row[col_indices['Scraped_Fail_Reason']] = r['fail_reason'] or ''
+                        else:
+                            out_row.append(r['fail_reason'] or '')
+                            
+                        writer.writerow(out_row)
                 else:
                     writer = csv.DictWriter(f, fieldnames=[
                         'name', 'city', 'url', 'rating', 'review_count', 'source', 'fail_reason'
