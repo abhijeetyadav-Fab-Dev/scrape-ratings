@@ -1401,10 +1401,10 @@ class BookingExtranetSource(ExtranetSource):
                             "[class*='promo'], [class*='offer'], "
                             "text='active promotions', text='no active promotions', "
                             "text='Choose new promotion'",
-                            timeout=4000
+                            timeout=1500
                         )
                     except Exception:
-                        page.wait_for_timeout(1000) # fallback sleep
+                        page.wait_for_timeout(500) # fallback sleep
                     
                     # Extract the exact property name from the actual property page!
                     exact_name = self._extract_property_name_from_page(page)
