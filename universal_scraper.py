@@ -1040,7 +1040,7 @@ class BookingExtranetSource(ExtranetSource):
 
 class MMTExtranetSource(ExtranetSource):
     source_name = "MMT (MakeMyTrip) Extranet"
-    login_url = "https://hotel.makemytrip.com/"
+    login_url = "https://in.goibibo.com/newextranet/dashboard"
 
     @property
     def cookies_path(self):
@@ -1136,8 +1136,10 @@ class MMTExtranetSource(ExtranetSource):
                 return "promotions"
             if key.startswith("mmt_rev"):
                 return "reviews"
-            if key.startswith("mmt_settlement"):
+            if key.startswith("mmt_settlement") or key.startswith("mmt_commission") or key.startswith("mmt_tds") or key.startswith("mmt_invoice"):
                 return "financial"
+            if key.startswith("mmt_prop") or key.startswith("mmt_amenities") or key.startswith("mmt_room"):
+                return "property"
             if key.startswith("mmt"):
                 return "reservations"
         return "general"
@@ -1397,8 +1399,10 @@ class GoibiboExtranetSource(ExtranetSource):
                 return "reports"
             if key.startswith("goi_rev"):
                 return "reviews"
-            if key.startswith("goi_settlement"):
+            if key.startswith("goi_settlement") or key.startswith("goi_commission") or key.startswith("goi_tds") or key.startswith("goi_invoice") or key.startswith("goi_payout"):
                 return "financial"
+            if key.startswith("goi_prop") or key.startswith("goi_amenities") or key.startswith("goi_room"):
+                return "property"
             if key.startswith("goi"):
                 return "reservations"
         return "general"
@@ -1610,7 +1614,7 @@ class AgodaExtranetSource(ExtranetSource):
                     {"key": "agd_commission",      "label": "Commission"},
                     {"key": "agd_invoice_id",      "label": "Invoice ID"},
                     {"key": "agd_txn_id",          "label": "Transaction ID"},
-                    {"key": "agd_status",          "label": "Payment Status"},
+                    {"key": "agd_payment_status",  "label": "Payment Status"},
                 ]
             },
             {
@@ -1652,8 +1656,10 @@ class AgodaExtranetSource(ExtranetSource):
                 return "promotions"
             if key.startswith("agd_rev"):
                 return "reviews"
-            if key.startswith("agd_prop"):
+            if key.startswith("agd_prop") or key.startswith("agd_room") or key.startswith("agd_rate") or key.startswith("agd_amenities") or key.startswith("agd_policies") or key.startswith("agd_photos"):
                 return "property"
+            if key.startswith("agd_payout") or key.startswith("agd_commission") or key.startswith("agd_invoice") or key.startswith("agd_txn") or key.startswith("agd_payment"):
+                return "financial"
             if key.startswith("agd"):
                 return "reservations"
         return "general"
@@ -1765,7 +1771,7 @@ class AgodaExtranetSource(ExtranetSource):
                 "commission": "agd_commission",
                 "invoice": "agd_invoice_id", "id": "agd_invoice_id",
                 "transaction": "agd_txn_id", "txn": "agd_txn_id",
-                "status": "agd_status", "payment": "agd_status",
+                "status": "agd_payment_status", "payment": "agd_payment_status",
             })
             if rows:
                 return rows
@@ -2454,6 +2460,7 @@ class ExtranetScrapeWorker(QThread):
 
         try:
             pw = sync_playwright().start()
+            # Use launch_persistent_context to safely maintain logins/profile persistent state
             context = pw.chromium.launch_persistent_context(
                 user_data_dir=str(COOKIES_DIR / 'chrome_extranet'),
                 headless=False,
@@ -2464,7 +2471,7 @@ class ExtranetScrapeWorker(QThread):
                     "--window-size=1280,900",
                 ]
             )
-            page = context.new_page()
+            page = context.pages[0] if context.pages else context.new_page()
 
             # ── Login (if needed) ──────────────────────────
             cookies_path = source.cookies_path
@@ -2854,13 +2861,15 @@ class UniversalScraperTab(QWidget):
                 pw = sync_playwright().start()
                 context = pw.chromium.launch_persistent_context(
                     user_data_dir=str(COOKIES_DIR / 'chrome_extranet'),
-                    headless=False, channel="chrome",
+                    headless=False,
+                    channel="chrome",
                     args=[
                         f"--remote-debugging-port={EXTRANET_DEBUG_PORT}",
-                        "--no-first-run", "--window-size=1280,900",
+                        "--no-first-run",
+                        "--window-size=1280,900",
                     ]
                 )
-                page = context.new_page()
+                page = context.pages[0] if context.pages else context.new_page()
                 page.goto(source.login_url, timeout=30000, wait_until="domcontentloaded")
                 time.sleep(3)
                 self.log_signal.emit(f"Chrome opened at {source.login_url}")
