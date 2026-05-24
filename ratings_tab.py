@@ -251,6 +251,11 @@ class RatingsTab(QWidget):
         self.browse_btn.clicked.connect(self.browse_file)
         btn_row.addWidget(self.browse_btn)
 
+        self.sample_btn = QPushButton("Download Sample")
+        self.sample_btn.clicked.connect(self.download_sample_csv)
+        self.sample_btn.setStyleSheet("background-color: #3498db; font-weight: bold;")
+        btn_row.addWidget(self.sample_btn)
+
         btn_row.addWidget(QLabel("Workers:"))
         self.worker_spin = QSpinBox()
         self.worker_spin.setRange(1, 100)
@@ -450,6 +455,22 @@ class RatingsTab(QWidget):
         self.log.append("")
 
     # ── CSV Loading ─────────────────────────────────────────
+
+    def download_sample_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Sample CSV", "sample_ratings_scraper.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Hotel Name", "City", "FHID", "URL"])
+                writer.writerows([
+                    ["FabHotel Raj Villa", "Indore", "1234", "http://booking.com/..."],
+                    ["FabHotel The Corporate", "Mumbai", "", ""]
+                ])
+            QMessageBox.information(self, "Success", f"Sample CSV saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save CSV:\n{e}")
 
     def browse_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select CSV", "", "CSV Files (*.csv)")

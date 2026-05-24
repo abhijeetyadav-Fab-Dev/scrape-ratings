@@ -370,6 +370,213 @@ class GodModeWorker(QThread):
         self.finished.emit(self.output_path, success, total)
 
 
+# ── Bulk Parallel Listing Finder Worker ───────────────────
+
+class BulkParallelFinderWorker(QThread):
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(list, str) # results list, output file path
+
+    def __init__(self, items, platforms):
+        super().__init__()
+        self.items = items # list of {'name': name, 'city': city}
+        self.platforms = platforms
+        self._stop = False
+        self._pause = False
+        self.results = []
+
+    def stop(self):
+        self._stop = True
+
+    def pause(self):
+        self._pause = True
+
+    def resume(self):
+        self._pause = False
+
+    def run(self):
+        from playwright.sync_api import sync_playwright
+        import urllib.parse
+        import difflib
+
+        total = len(self.items)
+        self.results = []
+
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
+                page = context.new_page()
+            except Exception as e:
+                self.progress.emit(0, total, f"Failed to launch browser: {e}")
+                self.finished.emit([], "")
+                return
+
+            for idx, item in enumerate(self.items):
+                while self._pause and not self._stop:
+                    self.msleep(100)
+                if self._stop:
+                    break
+
+                target_name = item.get('name', '')
+                city = item.get('city', '')
+                cleaned_target = clean_hotel_name(target_name)
+                
+                self.progress.emit(idx + 1, total, f"Searching for: {target_name} ({city})")
+
+                query = f"{cleaned_target} {city}".strip()
+                query_encoded = urllib.parse.quote_plus(query)
+
+                for platform in self.platforms:
+                    if self._stop:
+                        break
+
+                    try:
+                        if platform == 'booking':
+                            search_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
+                            page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(1500)
+                            cards = page.query_selector_all('[data-testid="property-card"], [data-testid="sr-property-card-common"]')[:3]
+                            
+                            for card in cards:
+                                name_el = card.query_selector('[data-testid="title"], h3, .sr-hotel__name')
+                                name = name_el.inner_text().strip() if name_el else ''
+                                if not name:
+                                    continue
+                                
+                                loc_el = card.query_selector('[data-testid="address"], [data-testid="location"]')
+                                location = loc_el.inner_text().strip() if loc_el else ''
+
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
+                                similarity = int(ratio * 100)
+                                is_fab = 'fab' in name.lower()
+
+                                self.results.append({
+                                    'target_name': target_name,
+                                    'target_city': city,
+                                    'candidate_name': name,
+                                    'platform': 'Booking.com',
+                                    'address': location or city,
+                                    'similarity': f"{similarity}%",
+                                    'verdict': 'FabHotel Chain' if is_fab else 'Potential Duplicate (Non-Fab)'
+                                })
+
+                        elif platform == 'agoda':
+                            search_url = f"https://www.agoda.com/search?text={query_encoded}"
+                            page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(2000)
+                            cards = page.query_selector_all('li[data-selenium="property-item"], [data-selenium="hotel-item"], .PropertyCard')[:3]
+                            
+                            for card in cards:
+                                name_el = card.query_selector('[data-selenium="hotel-name"], h3, h4, .property-card-title')
+                                name = name_el.inner_text().strip() if name_el else ''
+                                if not name:
+                                    continue
+
+                                loc_el = card.query_selector('[data-selenium="area-city-name"], .property-card-location')
+                                location = loc_el.inner_text().strip() if loc_el else ''
+
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
+                                similarity = int(ratio * 100)
+                                is_fab = 'fab' in name.lower()
+
+                                self.results.append({
+                                    'target_name': target_name,
+                                    'target_city': city,
+                                    'candidate_name': name,
+                                    'platform': 'Agoda',
+                                    'address': location or city,
+                                    'similarity': f"{similarity}%",
+                                    'verdict': 'FabHotel Chain' if is_fab else 'Potential Duplicate (Non-Fab)'
+                                })
+
+                        elif platform == 'expedia':
+                            search_url = f"https://www.expedia.com/Hotel-Search?destination={query_encoded}"
+                            page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(2000)
+                            cards = page.query_selector_all('[data-stid="property-card"], .uitk-card')[:3]
+                            
+                            for card in cards:
+                                name_el = card.query_selector('h3, h4')
+                                name = name_el.inner_text().strip() if name_el else ''
+                                if not name:
+                                    continue
+
+                                loc_el = card.query_selector('[data-test-id="neighborhood"]')
+                                location = loc_el.inner_text().strip() if loc_el else ''
+
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
+                                similarity = int(ratio * 100)
+                                is_fab = 'fab' in name.lower()
+
+                                self.results.append({
+                                    'target_name': target_name,
+                                    'target_city': city,
+                                    'candidate_name': name,
+                                    'platform': 'Expedia',
+                                    'address': location or city,
+                                    'similarity': f"{similarity}%",
+                                    'verdict': 'FabHotel Chain' if is_fab else 'Potential Duplicate (Non-Fab)'
+                                })
+
+                        elif platform == 'mmt':
+                            search_url = f"https://www.makemytrip.com/hotels/hotel-listing/?searchText={query_encoded}"
+                            page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(2000)
+                            cards = page.query_selector_all('.infinite-scroll-component > div, [class*="ListingCard"]')[:3]
+                            
+                            for card in cards:
+                                name_el = card.query_selector('p[class*="hotelName"], h3, span[class*="hotelName"]')
+                                name = name_el.inner_text().strip() if name_el else ''
+                                if not name:
+                                    continue
+
+                                loc_el = card.query_selector('span[class*="location"]')
+                                location = loc_el.inner_text().strip() if loc_el else ''
+
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
+                                similarity = int(ratio * 100)
+                                is_fab = 'fab' in name.lower()
+
+                                self.results.append({
+                                    'target_name': target_name,
+                                    'target_city': city,
+                                    'candidate_name': name,
+                                    'platform': 'MakeMyTrip',
+                                    'address': location or city,
+                                    'similarity': f"{similarity}%",
+                                    'verdict': 'FabHotel Chain' if is_fab else 'Potential Duplicate (Non-Fab)'
+                                })
+
+                    except Exception as e:
+                        pass
+
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+        # Write multi-row CSV
+        output_path = str(Path.home() / "Downloads" / f"parallel_listings_{int(time.time())}.csv")
+        try:
+            fieldnames = ['Target Hotel Name', 'Target City', 'Candidate Name', 'Platform', 'Candidate Address', 'Name Similarity', 'Verdict']
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for res in self.results:
+                    writer.writerow(res)
+        except Exception as e:
+            print(f"Error writing CSV: {e}")
+
+        self.finished.emit(self.results, output_path)
+
+
 # ── Bulk Link Builder Worker ──────────────────────────────
 
 class BulkLinkBuilderWorker(QThread):
@@ -666,10 +873,11 @@ class ParallelListingWorker(QThread):
         import urllib.parse
         import difflib
 
-        query = f"{self.hotel_name} {self.city}".strip()
+        cleaned_target = clean_hotel_name(self.hotel_name)
+        query = f"{cleaned_target} {self.city}".strip()
         query_encoded = urllib.parse.quote_plus(query)
 
-        self.progress.emit(f"Launching search for '{query}' across {len(self.platforms)} platforms...")
+        self.progress.emit(f"Launching search for '{query}' (Target stripped: '{cleaned_target}') across {len(self.platforms)} platforms...")
 
         with sync_playwright() as p:
             try:
@@ -725,8 +933,10 @@ class ParallelListingWorker(QThread):
                                 if not photo_url and img_el:
                                     photo_url = img_el.get_attribute('data-src') or ''
                                 
-                                ratio = difflib.SequenceMatcher(None, self.hotel_name.lower(), name.lower()).ratio()
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
                                 similarity = int(ratio * 100)
+                                is_fab = 'fab' in name.lower()
                                 
                                 cand = {
                                     'name': name,
@@ -735,7 +945,8 @@ class ParallelListingWorker(QThread):
                                     'url': url,
                                     'photo_url': photo_url or '',
                                     'similarity': f"{similarity}%",
-                                    'similarity_val': similarity
+                                    'similarity_val': similarity,
+                                    'is_fab': is_fab
                                 }
                                 self.candidates.append(cand)
                                 self.candidate_found.emit(cand)
@@ -778,8 +989,10 @@ class ParallelListingWorker(QThread):
                                 if not photo_url and img_el:
                                     photo_url = img_el.get_attribute('data-src') or ''
 
-                                ratio = difflib.SequenceMatcher(None, self.hotel_name.lower(), name.lower()).ratio()
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
                                 similarity = int(ratio * 100)
+                                is_fab = 'fab' in name.lower()
 
                                 cand = {
                                     'name': name,
@@ -788,7 +1001,8 @@ class ParallelListingWorker(QThread):
                                     'url': url,
                                     'photo_url': photo_url or '',
                                     'similarity': f"{similarity}%",
-                                    'similarity_val': similarity
+                                    'similarity_val': similarity,
+                                    'is_fab': is_fab
                                 }
                                 self.candidates.append(cand)
                                 self.candidate_found.emit(cand)
@@ -831,8 +1045,10 @@ class ParallelListingWorker(QThread):
                                 if not photo_url and img_el:
                                     photo_url = img_el.get_attribute('data-src') or ''
 
-                                ratio = difflib.SequenceMatcher(None, self.hotel_name.lower(), name.lower()).ratio()
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
                                 similarity = int(ratio * 100)
+                                is_fab = 'fab' in name.lower()
 
                                 cand = {
                                     'name': name,
@@ -841,7 +1057,8 @@ class ParallelListingWorker(QThread):
                                     'url': url,
                                     'photo_url': photo_url or '',
                                     'similarity': f"{similarity}%",
-                                    'similarity_val': similarity
+                                    'similarity_val': similarity,
+                                    'is_fab': is_fab
                                 }
                                 self.candidates.append(cand)
                                 self.candidate_found.emit(cand)
@@ -882,8 +1099,10 @@ class ParallelListingWorker(QThread):
                                 img_el = card.query_selector('img')
                                 photo_url = img_el.get_attribute('src') if img_el else ''
 
-                                ratio = difflib.SequenceMatcher(None, self.hotel_name.lower(), name.lower()).ratio()
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
                                 similarity = int(ratio * 100)
+                                is_fab = 'fab' in name.lower()
 
                                 cand = {
                                     'name': name,
@@ -892,7 +1111,8 @@ class ParallelListingWorker(QThread):
                                     'url': url,
                                     'photo_url': photo_url or '',
                                     'similarity': f"{similarity}%",
-                                    'similarity_val': similarity
+                                    'similarity_val': similarity,
+                                    'is_fab': is_fab
                                 }
                                 self.candidates.append(cand)
                                 self.candidate_found.emit(cand)
@@ -911,6 +1131,16 @@ class ParallelListingWorker(QThread):
 
         self.progress.emit("Multi-platform search finished.")
         self.finished.emit(self.candidates)
+
+
+# ── Clean Hotel Name Helper (FabHotels Duplicate Checking) ──
+
+def clean_hotel_name(name: str) -> str:
+    """Strip common brand prefixes like FabHotel, FabHotels, FabExpress, Fab to find duplicate candidates."""
+    if not name:
+        return ""
+    cleaned = re.sub(r'\b(?:fabhotel|fabhotels|fabexpress|fab)\b', '', name, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', cleaned).strip()
 
 
 # ── Link Builder ──────────────────────────────────────────
@@ -1190,6 +1420,11 @@ class GodModeTab(QWidget):
         self.bulk_link_browse_btn.clicked.connect(self.browse_link_csv)
         ctrl_row.addWidget(self.bulk_link_browse_btn)
 
+        self.bulk_link_sample_btn = QPushButton("Download Sample")
+        self.bulk_link_sample_btn.clicked.connect(self.download_link_sample)
+        self.bulk_link_sample_btn.setStyleSheet("background-color: #3498db; font-weight: bold;")
+        ctrl_row.addWidget(self.bulk_link_sample_btn)
+
         self.bulk_link_start_btn = QPushButton("Start")
         self.bulk_link_start_btn.clicked.connect(self.start_bulk_links)
         self.bulk_link_start_btn.setStyleSheet("background-color: #e94560; font-weight: bold;")
@@ -1245,8 +1480,14 @@ class GodModeTab(QWidget):
 
     def _build_parallel_finder_tab(self):
         tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setSpacing(10)
+        main_layout = QHBoxLayout(tab)
+        main_layout.setSpacing(10)
+
+        # ── Left Column: Single Parallel Finder ─────────────────
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
 
         # Target Hotel input section
         target_group = QGroupBox("Target Hotel & Location Details")
@@ -1299,7 +1540,7 @@ class GodModeTab(QWidget):
 
         target_grid.addLayout(btn_row, 3, 0, 1, 2)
 
-        layout.addWidget(target_group)
+        left_layout.addWidget(target_group)
 
         # Results table
         results_group = QGroupBox("Parallel Listing Candidates")
@@ -1315,14 +1556,99 @@ class GodModeTab(QWidget):
         self.parallel_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         results_layout.addWidget(self.parallel_table)
 
-        layout.addWidget(results_group, 1)
+        left_layout.addWidget(results_group, 1)
 
         # Console status
         self.parallel_log = QTextEdit()
         self.parallel_log.setReadOnly(True)
         self.parallel_log.setMaximumHeight(100)
         self.parallel_log.setStyleSheet("background: #111; color: #a0e0a0; font-family: Consolas; font-size: 11px;")
-        layout.addWidget(self.parallel_log)
+        left_layout.addWidget(self.parallel_log)
+
+        main_layout.addWidget(left_widget, 1)
+
+        # ── Right Column: Bulk Parallel Finder ─────────────────
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+
+        bulk_group = QGroupBox("Bulk Parallel Finder")
+        bulk_layout = QVBoxLayout(bulk_group)
+        bulk_layout.setSpacing(8)
+
+        bulk_label = QLabel("Paste multiple hotels (one per line, format: Target Name, City) OR load a CSV:")
+        bulk_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        bulk_layout.addWidget(bulk_label)
+
+        self.bulk_parallel_input = QTextEdit()
+        self.bulk_parallel_input.setPlaceholderText(
+            "e.g.\nFabHotel Raj Villa, Indore\nFabHotel The Corporate, Mumbai"
+        )
+        self.bulk_parallel_input.setMaximumHeight(120)
+        bulk_layout.addWidget(self.bulk_parallel_input)
+
+        # Controls Row
+        ctrl_row2 = QHBoxLayout()
+        self.bulk_parallel_browse_btn = QPushButton("Browse CSV")
+        self.bulk_parallel_browse_btn.clicked.connect(self.browse_parallel_csv)
+        ctrl_row2.addWidget(self.bulk_parallel_browse_btn)
+
+        self.bulk_parallel_sample_btn = QPushButton("Download Sample")
+        self.bulk_parallel_sample_btn.clicked.connect(self.download_parallel_sample)
+        self.bulk_parallel_sample_btn.setStyleSheet("background-color: #3498db; font-weight: bold;")
+        ctrl_row2.addWidget(self.bulk_parallel_sample_btn)
+
+        self.bulk_parallel_start_btn = QPushButton("Start")
+        self.bulk_parallel_start_btn.clicked.connect(self.start_bulk_parallel)
+        self.bulk_parallel_start_btn.setStyleSheet("background-color: #e94560; font-weight: bold;")
+        ctrl_row2.addWidget(self.bulk_parallel_start_btn)
+
+        self.bulk_parallel_pause_btn = QPushButton("Pause")
+        self.bulk_parallel_pause_btn.clicked.connect(self.pause_bulk_parallel)
+        self.bulk_parallel_pause_btn.setStyleSheet("background-color: #f5a623; font-weight: bold;")
+        self.bulk_parallel_pause_btn.setEnabled(False)
+        ctrl_row2.addWidget(self.bulk_parallel_pause_btn)
+
+        self.bulk_parallel_stop_btn = QPushButton("Stop")
+        self.bulk_parallel_stop_btn.clicked.connect(self.stop_bulk_parallel)
+        self.bulk_parallel_stop_btn.setStyleSheet("background-color: #c0392b; font-weight: bold;")
+        self.bulk_parallel_stop_btn.setEnabled(False)
+        ctrl_row2.addWidget(self.bulk_parallel_stop_btn)
+
+        bulk_layout.addLayout(ctrl_row2)
+
+        # Actions Row
+        act_row2 = QHBoxLayout()
+        self.bulk_parallel_download_btn = QPushButton("Download CSV")
+        self.bulk_parallel_download_btn.clicked.connect(self.download_parallel_csv)
+        self.bulk_parallel_download_btn.setStyleSheet("background-color: #27ae60; font-weight: bold;")
+        self.bulk_parallel_download_btn.setEnabled(False)
+        act_row2.addWidget(self.bulk_parallel_download_btn)
+
+        self.bulk_parallel_clear_btn = QPushButton("Clear")
+        self.bulk_parallel_clear_btn.clicked.connect(self.clear_bulk_parallel)
+        self.bulk_parallel_clear_btn.setStyleSheet("background-color: #555; font-weight: bold;")
+        act_row2.addWidget(self.bulk_parallel_clear_btn)
+
+        bulk_layout.addLayout(act_row2)
+
+        self.bulk_parallel_progress = QProgressBar()
+        self.bulk_parallel_progress.setVisible(False)
+        bulk_layout.addWidget(self.bulk_parallel_progress)
+
+        right_layout.addWidget(bulk_group)
+
+        # Log
+        log_group = QGroupBox("Bulk Console Output")
+        log_layout = QVBoxLayout(log_group)
+        self.bulk_parallel_log = QTextEdit()
+        self.bulk_parallel_log.setReadOnly(True)
+        self.bulk_parallel_log.setStyleSheet("background: #111; color: #a0e0a0; font-family: Consolas; font-size: 11px;")
+        log_layout.addWidget(self.bulk_parallel_log)
+        right_layout.addWidget(log_group, 1)
+
+        main_layout.addWidget(right_widget, 1)
 
         return tab
 
@@ -1813,3 +2139,143 @@ class GodModeTab(QWidget):
                     item.setForeground(Qt.GlobalColor.green)
                     self.parallel_log.append(f"Row #{row+1} Marked as SAFE / Unique listing.")
 
+
+    # ── Samples & Utilities ──────────────────────────────────────
+
+    def _save_sample_csv(self, headers: list, default_name: str, mock_rows: list):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Sample CSV", default_name, "CSV Files (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                writer.writerows(mock_rows)
+            QMessageBox.information(self, "Success", f"Sample CSV saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save CSV:\n{e}")
+
+    def download_link_sample(self):
+        headers = ["Hotel Name", "City", "FHID", "URL"]
+        rows = [
+            ["FabHotel Raj Villa", "Indore", "1234", "http://booking.com/..."],
+            ["FabHotel The Corporate", "Mumbai", "", ""]
+        ]
+        self._save_sample_csv(headers, "sample_link_builder.csv", rows)
+
+    def download_parallel_sample(self):
+        headers = ["Hotel Name", "City"]
+        rows = [
+            ["FabHotel Raj Villa", "Indore"],
+            ["FabHotel The Corporate", "Mumbai"]
+        ]
+        self._save_sample_csv(headers, "sample_parallel_finder.csv", rows)
+
+    # ── Bulk Parallel Finder Logic ───────────────────────────────
+
+    def browse_parallel_csv(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select CSV", "", "CSV Files (*.csv)")
+        if path:
+            try:
+                with open(path, newline='', encoding='utf-8') as f:
+                    csv_content = f.read()
+                self.bulk_parallel_input.setPlainText(csv_content)
+                self.bulk_parallel_log.append(f"Loaded CSV: {path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load CSV:\n{e}")
+
+    def start_bulk_parallel(self):
+        text = self.bulk_parallel_input.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "No Input", "Please paste some items or load a CSV.")
+            return
+
+        items = []
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line or line.lower().startswith('hotel name'):
+                continue
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 2:
+                items.append({'name': parts[0], 'city': parts[1]})
+
+        if not items:
+            QMessageBox.warning(self, "Invalid Input", "Could not parse any valid items. Format: Name, City")
+            return
+
+        platforms = []
+        if self.cb_booking.isChecked(): platforms.append('booking')
+        if self.cb_mmt.isChecked(): platforms.append('mmt')
+        if self.cb_agoda.isChecked(): platforms.append('agoda')
+        if self.cb_expedia.isChecked(): platforms.append('expedia')
+
+        if not platforms:
+            QMessageBox.warning(self, "No Platforms", "Please select at least one platform to search.")
+            return
+
+        if hasattr(self, 'bulk_parallel_worker') and self.bulk_parallel_worker.isRunning():
+            if self.bulk_parallel_worker._pause:
+                self.bulk_parallel_worker.resume()
+                self.bulk_parallel_pause_btn.setText("Pause")
+                self.bulk_parallel_log.append("Resumed worker...")
+                return
+
+        self.bulk_parallel_start_btn.setEnabled(False)
+        self.bulk_parallel_pause_btn.setEnabled(True)
+        self.bulk_parallel_stop_btn.setEnabled(True)
+        self.bulk_parallel_download_btn.setEnabled(False)
+
+        self.bulk_parallel_log.clear()
+        self.bulk_parallel_log.append(f"Starting bulk parallel finder for {len(items)} targets...")
+
+        self.bulk_parallel_progress.setVisible(True)
+        self.bulk_parallel_progress.setMaximum(len(items))
+        self.bulk_parallel_progress.setValue(0)
+
+        self.bulk_parallel_worker = BulkParallelFinderWorker(items, platforms)
+        self.bulk_parallel_worker.progress.connect(self.on_bulk_parallel_progress)
+        self.bulk_parallel_worker.finished.connect(self.on_bulk_parallel_finished)
+        self.bulk_parallel_worker.start()
+
+    def pause_bulk_parallel(self):
+        if hasattr(self, 'bulk_parallel_worker') and self.bulk_parallel_worker.isRunning():
+            if not self.bulk_parallel_worker._pause:
+                self.bulk_parallel_worker.pause()
+                self.bulk_parallel_pause_btn.setText("Resume")
+                self.bulk_parallel_log.append("Pausing worker (will pause after current item)...")
+
+    def stop_bulk_parallel(self):
+        if hasattr(self, 'bulk_parallel_worker') and self.bulk_parallel_worker.isRunning():
+            self.bulk_parallel_worker.stop()
+            self.bulk_parallel_log.append("Stopping worker (will stop after current item)...")
+
+    def clear_bulk_parallel(self):
+        self.bulk_parallel_input.clear()
+        self.bulk_parallel_log.clear()
+        self.bulk_parallel_progress.setVisible(False)
+        self.bulk_parallel_download_btn.setEnabled(False)
+
+    def on_bulk_parallel_progress(self, current, total, status):
+        self.bulk_parallel_progress.setValue(current)
+        self.bulk_parallel_log.append(status)
+
+    def on_bulk_parallel_finished(self, results, output_path):
+        self.bulk_parallel_start_btn.setEnabled(True)
+        self.bulk_parallel_pause_btn.setEnabled(False)
+        self.bulk_parallel_stop_btn.setEnabled(False)
+        self.bulk_parallel_pause_btn.setText("Pause")
+        self.bulk_parallel_output_path = output_path
+        self.bulk_parallel_download_btn.setEnabled(True)
+        self.bulk_parallel_log.append(f"\nDONE! Results saved to: {output_path}")
+
+    def download_parallel_csv(self):
+        if hasattr(self, 'bulk_parallel_output_path') and self.bulk_parallel_output_path:
+            import os, shutil, time
+            default_name = f"parallel_results_{int(time.time())}.csv"
+            save_path, _ = QFileDialog.getSaveFileName(self, "Save Results", default_name, "CSV Files (*.csv)")
+            if save_path:
+                try:
+                    shutil.copy(self.bulk_parallel_output_path, save_path)
+                    QMessageBox.information(self, "Success", f"File saved to:\n{save_path}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to save file:\n{e}")
