@@ -1049,16 +1049,26 @@ class ParallelListingWorker(QThread):
                         page.wait_for_timeout(2000)
                         cards = page.query_selector_all('[data-testid="property-card"], [data-testid="sr-property-card-common"]')[:5]
                     elif platform == 'agoda':
-                        search_url = f"https://www.agoda.com/search?text={query_encoded}"
+                        search_url = f"https://www.agoda.com/en-gb/search?text={query_encoded}"
                         page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
                         page.wait_for_timeout(2500)
-                        cards = page.query_selector_all('li[data-selenium="property-item"], [data-selenium="hotel-item"], .PropertyCard')[:5]
+                        cards = page.query_selector_all('li[data-selenium="property-item"], [data-selenium="hotel-item"], .PropertyCard, a[href*="/hotel/"]')[:5]
                     elif platform == 'expedia':
                         search_url = f"https://www.expedia.com/Hotel-Search?destination={query_encoded}"
                         page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
                         page.wait_for_timeout(2500)
                         cards = page.query_selector_all('[data-stid="property-card"], .uitk-card')[:5]
                     elif platform == 'mmt':
+                        import pickle
+                        from pathlib import Path
+                        cookies_path = Path.home() / ".scrape-ratings" / "mmt_cookies.pkl"
+                        if cookies_path.exists():
+                            try:
+                                with open(cookies_path, 'rb') as f:
+                                    cookies = pickle.load(f)
+                                page.context.add_cookies(cookies)
+                            except Exception as e:
+                                print(f"Failed to load MMT cookies: {e}")
                         search_url = f"https://www.makemytrip.com/hotels/hotel-listing/?searchText={query_encoded}"
                         page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
                         page.wait_for_timeout(2500)
