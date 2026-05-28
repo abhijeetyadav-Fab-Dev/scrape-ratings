@@ -16,9 +16,14 @@ Architecture:
   └── ExpediaPlatform   (TBD, scale /10)
 """
 
-import re, os, time, pickle, threading, json, subprocess
+import sys, re, os, time, pickle, threading, json, subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
+
+
+# Set Playwright browser path to the user's local ms-playwright folder if running as a frozen executable
+if getattr(sys, 'frozen', False):
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(Path.home() / "AppData" / "Local" / "ms-playwright")
 
 COOKIES_DIR = Path.home() / ".scrape-ratings"
 COOKIES_DIR.mkdir(exist_ok=True)

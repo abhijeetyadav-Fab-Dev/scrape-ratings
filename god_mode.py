@@ -702,88 +702,102 @@ class PhotoCompareDialog(QDialog):
     def __init__(self, target_info, candidate_info, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Audit Parallel Listing Duplicate — Visual Comparison")
-        self.setFixedSize(800, 480)
+        self.setFixedSize(900, 600)
         self.setStyleSheet("""
             QDialog { background-color: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI'; }
             QLabel { color: #e0e0e0; }
-            QPushButton { border-radius: 6px; padding: 10px 20px; font-weight: bold; border: none; }
+            QPushButton { border-radius: 6px; padding: 8px 16px; font-weight: bold; border: none; }
             QPushButton:hover { opacity: 0.9; }
         """)
 
         self.result_action = None
+        self.target_photos = target_info.get('photos', [target_info.get('photo_url')]) if target_info.get('photos') else [target_info.get('photo_url', '')]
+        self.candidate_photos = candidate_info.get('photos', [candidate_info.get('photo_url')]) if candidate_info.get('photos') else [candidate_info.get('photo_url', '')]
+        
+        # Clean empty links
+        self.target_photos = [p for p in self.target_photos if p]
+        self.candidate_photos = [p for p in self.candidate_photos if p]
+
         self.downloaders = []
 
         main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(15, 15, 15, 15)
 
         # Header description
-        desc_label = QLabel("Compare the details and photos of the two listings side by side to determine if they are the same hotel.")
-        desc_label.setStyleSheet("color: #aaa; font-size: 12px;")
-        desc_label.setWordWrap(True)
+        desc_label = QLabel("Compare up to 10 photos side by side. Click thumbnails to switch the preview.")
+        desc_label.setStyleSheet("color: #aaa; font-size: 11px;")
         main_layout.addWidget(desc_label)
 
         # Content split
         content_layout = QHBoxLayout()
-        content_layout.setSpacing(20)
+        content_layout.setSpacing(15)
 
         # Left Column: Target Reference Hotel
         left_box = QGroupBox("Target Reference Hotel")
-        left_box.setStyleSheet("QGroupBox { border: 1px solid #e94560; border-radius: 6px; font-weight: bold; color: #e94560; margin-top: 10px; padding-top: 10px; }")
+        left_box.setStyleSheet("QGroupBox { border: 1px solid #e94560; border-radius: 6px; font-weight: bold; color: #e94560; margin-top: 5px; padding-top: 10px; }")
         left_layout = QVBoxLayout(left_box)
         left_layout.setSpacing(6)
 
         t_name = QLabel(target_info.get('name', 'N/A'))
-        t_name.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        t_name.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         t_name.setWordWrap(True)
         left_layout.addWidget(t_name)
 
-        t_plat = QLabel(f"Platform: {target_info.get('platform', 'N/A')}")
-        t_plat.setStyleSheet("color: #e94560; font-weight: bold;")
+        t_plat = QLabel(f"Platform: {target_info.get('platform', 'N/A')} | Address: {target_info.get('address', 'N/A')}")
+        t_plat.setStyleSheet("color: #888; font-size: 10px;")
+        t_plat.setWordWrap(True)
         left_layout.addWidget(t_plat)
 
-        t_addr = QLabel(f"Location: {target_info.get('address', 'N/A')}")
-        t_addr.setStyleSheet("color: #888; font-size: 11px;")
-        t_addr.setWordWrap(True)
-        left_layout.addWidget(t_addr)
-
-        self.t_image = QLabel("Loading Image...")
-        self.t_image.setFixedSize(350, 220)
+        self.t_image = QLabel("No Image")
+        self.t_image.setFixedSize(400, 240)
         self.t_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.t_image.setStyleSheet("background-color: #111; border: 1px solid #333; border-radius: 4px; color: #666;")
         left_layout.addWidget(self.t_image)
+
+        # Target thumbnails
+        self.t_thumb_layout = QHBoxLayout()
+        self.t_thumb_layout.setSpacing(5)
+        left_layout.addLayout(self.t_thumb_layout)
 
         content_layout.addWidget(left_box)
 
         # Right Column: Candidate Hotel
         right_box = QGroupBox("Parallel Listing Candidate")
-        right_box.setStyleSheet("QGroupBox { border: 1px solid #0f3460; border-radius: 6px; font-weight: bold; color: #0f3460; margin-top: 10px; padding-top: 10px; }")
+        right_box.setStyleSheet("QGroupBox { border: 1px solid #0f3460; border-radius: 6px; font-weight: bold; color: #0f3460; margin-top: 5px; padding-top: 10px; }")
         right_layout = QVBoxLayout(right_box)
         right_layout.setSpacing(6)
 
         c_name = QLabel(candidate_info.get('name', 'N/A'))
-        c_name.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        c_name.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         c_name.setWordWrap(True)
         right_layout.addWidget(c_name)
 
-        c_plat = QLabel(f"Platform: {candidate_info.get('platform', 'N/A')}")
-        c_plat.setStyleSheet("color: #00bcd4; font-weight: bold;")
+        c_plat = QLabel(f"Platform: {candidate_info.get('platform', 'N/A')} | Address: {candidate_info.get('address', 'N/A')}")
+        c_plat.setStyleSheet("color: #888; font-size: 10px;")
+        c_plat.setWordWrap(True)
         right_layout.addWidget(c_plat)
 
-        c_addr = QLabel(f"Location: {candidate_info.get('address', 'N/A')}")
-        c_addr.setStyleSheet("color: #888; font-size: 11px;")
-        c_addr.setWordWrap(True)
-        right_layout.addWidget(c_addr)
-
-        self.c_image = QLabel("Loading Image...")
-        self.c_image.setFixedSize(350, 220)
+        self.c_image = QLabel("No Image")
+        self.c_image.setFixedSize(400, 240)
         self.c_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.c_image.setStyleSheet("background-color: #111; border: 1px solid #333; border-radius: 4px; color: #666;")
         right_layout.addWidget(self.c_image)
 
+        # Candidate thumbnails
+        self.c_thumb_layout = QHBoxLayout()
+        self.c_thumb_layout.setSpacing(5)
+        right_layout.addLayout(self.c_thumb_layout)
+
         content_layout.addWidget(right_box)
 
         main_layout.addLayout(content_layout)
+
+        # Similarity score label
+        self.match_lbl = QLabel(f"Automatic Visual Match Score: {candidate_info.get('photo_match_score', 'N/A')}")
+        self.match_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.match_lbl.setStyleSheet("color: #00bcd4; padding: 5px;")
+        main_layout.addWidget(self.match_lbl)
 
         # Action Buttons Row
         btn_layout = QHBoxLayout()
@@ -808,38 +822,74 @@ class PhotoCompareDialog(QDialog):
 
         main_layout.addLayout(btn_layout)
 
-        # Asynchronously load images
-        self._load_image(target_info.get('photo_url', ''), 'target')
-        self._load_image(candidate_info.get('photo_url', ''), 'candidate')
+        # Load thumbnails and setup callbacks
+        self.t_pixmaps = {}
+        self.c_pixmaps = {}
+        self._setup_thumbnails()
 
-    def _load_image(self, url, tag):
-        if not url:
-            self._set_placeholder(tag, "No Image URL")
-            return
-        downloader = ImageDownloader(url, tag)
-        downloader.loaded.connect(self._on_image_loaded)
-        downloader.start()
-        self.downloaders.append(downloader)
+    def _setup_thumbnails(self):
+        # Target
+        for idx, url in enumerate(self.target_photos[:10]):
+            btn = QPushButton(f"P{idx+1}")
+            btn.setFixedSize(35, 30)
+            btn.setStyleSheet("background-color: #333; font-size: 10px; color: white; padding: 2px;")
+            btn.clicked.connect(lambda checked, u=url, i=idx: self._view_target_photo(u, i))
+            self.t_thumb_layout.addWidget(btn)
+        
+        # Candidate
+        for idx, url in enumerate(self.candidate_photos[:10]):
+            btn = QPushButton(f"P{idx+1}")
+            btn.setFixedSize(35, 30)
+            btn.setStyleSheet("background-color: #333; font-size: 10px; color: white; padding: 2px;")
+            btn.clicked.connect(lambda checked, u=url, i=idx: self._view_candidate_photo(u, i))
+            self.c_thumb_layout.addWidget(btn)
 
-    def _on_image_loaded(self, img_bytes, tag):
+        # Auto-load first of each
+        if self.target_photos:
+            self._view_target_photo(self.target_photos[0], 0)
+        if self.candidate_photos:
+            self._view_candidate_photo(self.candidate_photos[0], 0)
+
+    def _view_target_photo(self, url, idx):
+        if url in self.t_pixmaps:
+            self.t_image.setPixmap(self.t_pixmaps[url])
+        else:
+            self.t_image.setText("Loading Image...")
+            downloader = ImageDownloader(url, f"target:{url}")
+            downloader.loaded.connect(self._on_image_loaded)
+            downloader.start()
+            self.downloaders.append(downloader)
+
+    def _view_candidate_photo(self, url, idx):
+        if url in self.c_pixmaps:
+            self.c_image.setPixmap(self.c_pixmaps[url])
+        else:
+            self.c_image.setText("Loading Image...")
+            downloader = ImageDownloader(url, f"candidate:{url}")
+            downloader.loaded.connect(self._on_image_loaded)
+            downloader.start()
+            self.downloaders.append(downloader)
+
+    def _on_image_loaded(self, img_bytes, tag_info):
         try:
             image = QImage.fromData(img_bytes)
             if image.isNull():
-                self._set_placeholder(tag, "Unsupported Format")
                 return
             pixmap = QPixmap.fromImage(image)
-            scaled_pixmap = pixmap.scaled(350, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            scaled = pixmap.scaled(400, 240, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             
-            if tag == 'target':
-                self.t_image.setPixmap(scaled_pixmap)
-            else:
-                self.c_image.setPixmap(scaled_pixmap)
-        except Exception:
-            self._set_placeholder(tag, "Loading Error")
+            parts = tag_info.split(':', 1)
+            tag = parts[0]
+            url = parts[1] if len(parts) > 1 else ""
 
-    def _set_placeholder(self, tag, text):
-        label = self.t_image if tag == 'target' else self.c_image
-        label.setText(text)
+            if tag == 'target':
+                self.t_pixmaps[url] = scaled
+                self.t_image.setPixmap(scaled)
+            else:
+                self.c_pixmaps[url] = scaled
+                self.c_image.setPixmap(scaled)
+        except Exception:
+            pass
 
     def _on_duplicate(self):
         self.result_action = 'duplicate'
@@ -861,12 +911,46 @@ class ParallelListingWorker(QThread):
         super().__init__()
         self.hotel_name = hotel_name
         self.city = city
-        self.platforms = platforms # list of keys, e.g. ['booking', 'mmt', 'agoda', 'expedia']
+        self.platforms = platforms
         self._stop = False
         self.candidates = []
 
     def stop(self):
         self._stop = True
+
+    def calculate_dhash(self, img_bytes):
+        try:
+            from PIL import Image
+            import io
+            image = Image.open(io.BytesIO(img_bytes))
+            # Convert to grayscale and resize to 9x8
+            image = image.convert('L').resize((9, 8), Image.Resampling.LANCZOS)
+            pixels = list(image.getdata())
+            difference = []
+            for row in range(8):
+                for col in range(8):
+                    pixel_left = pixels[row * 9 + col]
+                    pixel_right = pixels[row * 9 + col + 1]
+                    difference.append(pixel_left > pixel_right)
+            return difference
+        except Exception:
+            return None
+
+    def dhash_similarity(self, hash1, hash2):
+        if not hash1 or not hash2:
+            return 0.0
+        hamming_dist = sum(p1 != p2 for p1, p2 in zip(hash1, hash2))
+        return (64 - hamming_dist) / 64.0
+
+    def download_image_bytes(self, url):
+        try:
+            import urllib.request
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as response:
+                return response.read()
+        except Exception:
+            return None
 
     def run(self):
         from playwright.sync_api import sync_playwright
@@ -877,7 +961,7 @@ class ParallelListingWorker(QThread):
         query = f"{cleaned_target} {self.city}".strip()
         query_encoded = urllib.parse.quote_plus(query)
 
-        self.progress.emit(f"Launching search for '{query}' (Target stripped: '{cleaned_target}') across {len(self.platforms)} platforms...")
+        self.progress.emit(f"Launching search for '{query}'...")
 
         with sync_playwright() as p:
             try:
@@ -888,259 +972,238 @@ class ParallelListingWorker(QThread):
                 context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
                 page = context.new_page()
             except Exception as e:
-                self.progress.emit(f"Failed to launch Playwright browser: {e}")
+                self.progress.emit(f"Failed to launch browser: {e}")
                 self.finished.emit([])
                 return
 
+            # 1. Fetch Target / Reference Listing Photos first
+            target_photos = []
+            target_hashes = []
+            target_url = ""
+            
+            self.progress.emit("Obtaining reference details for target hotel...")
+            try:
+                # Search booking.com to find the target details
+                ss_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
+                page.goto(ss_url, timeout=20000, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
+                first_card = page.query_selector('[data-testid="property-card"], [data-testid="sr-property-card-common"]')
+                if first_card:
+                    link_el = first_card.query_selector('a[data-testid="title-link"], a[href*="/hotel/"]')
+                    target_url = link_el.get_attribute('href') if link_el else ''
+                    if target_url and target_url.startswith('/'):
+                        target_url = "https://www.booking.com" + target_url
+                    target_url = target_url.split('?')[0] if target_url else ""
+            except Exception as e:
+                self.progress.emit(f"Could not automatically fetch target detail page: {e}")
+
+            if target_url:
+                try:
+                    page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
+                    page.wait_for_timeout(1500)
+                    img_elements = page.query_selector_all('.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img')
+                    for img in img_elements:
+                        src = img.get_attribute('src') or img.get_attribute('data-lazy') or img.get_attribute('data-src')
+                        if src and src not in target_photos:
+                            target_photos.append(src)
+                            if len(target_photos) >= 10:
+                                break
+                    self.progress.emit(f"Loaded {len(target_photos)} reference photos from details page.")
+                except Exception as e:
+                    self.progress.emit(f"Error reading target details page gallery: {e}")
+
+            # Calculate hashes for reference photos
+            for url in target_photos:
+                ib = self.download_image_bytes(url)
+                if ib:
+                    h = self.calculate_dhash(ib)
+                    if h:
+                        target_hashes.append(h)
+
+            # 2. Iterate platforms to scan for candidates
             for platform in self.platforms:
                 if self._stop:
                     break
 
-                self.progress.emit(f"Searching {platform.upper()} search cards...")
-
+                self.progress.emit(f"Searching platform: {platform.upper()}...")
                 try:
+                    cards = []
                     if platform == 'booking':
                         search_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
                         page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
                         page.wait_for_timeout(2000)
-                        
-                        cards = page.query_selector_all('[data-testid="property-card"], [data-testid="sr-property-card-common"]')
-                        if not cards:
-                            cards = page.query_selector_all('div:has(a[href*="/hotel/"])')
-                        
-                        count = 0
-                        for card in cards[:6]:
-                            if self._stop:
-                                break
-                            try:
+                        cards = page.query_selector_all('[data-testid="property-card"], [data-testid="sr-property-card-common"]')[:5]
+                    elif platform == 'agoda':
+                        search_url = f"https://www.agoda.com/search?text={query_encoded}"
+                        page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
+                        page.wait_for_timeout(2500)
+                        cards = page.query_selector_all('li[data-selenium="property-item"], [data-selenium="hotel-item"], .PropertyCard')[:5]
+                    elif platform == 'expedia':
+                        search_url = f"https://www.expedia.com/Hotel-Search?destination={query_encoded}"
+                        page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
+                        page.wait_for_timeout(2500)
+                        cards = page.query_selector_all('[data-stid="property-card"], .uitk-card')[:5]
+                    elif platform == 'mmt':
+                        search_url = f"https://www.makemytrip.com/hotels/hotel-listing/?searchText={query_encoded}"
+                        page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
+                        page.wait_for_timeout(2500)
+                        cards = page.query_selector_all('.infinite-scroll-component > div, [class*="ListingCard"]')[:5]
+
+                    for card in cards:
+                        if self._stop:
+                            break
+                        try:
+                            # 1. Extract Details
+                            name, location, url, first_photo = "", "", "", ""
+                            if platform == 'booking':
                                 name_el = card.query_selector('[data-testid="title"], h3, .sr-hotel__name')
                                 name = name_el.inner_text().strip() if name_el else ''
-                                if not name:
-                                    continue
-                                
-                                loc_el = card.query_selector('[data-testid="address"], [data-testid="location"], .sr_card_address_line')
+                                loc_el = card.query_selector('[data-testid="address"], [data-testid="location"]')
                                 location = loc_el.inner_text().strip() if loc_el else ''
-                                
                                 link_el = card.query_selector('a[data-testid="title-link"], a[href*="/hotel/"]')
                                 url = link_el.get_attribute('href') if link_el else ''
                                 if url and url.startswith('/'):
                                     url = "https://www.booking.com" + url
-                                if url:
-                                    url = url.split('?')[0]
-
-                                img_el = card.query_selector('img[data-testid="image"], img[src*="hotel"], img')
-                                photo_url = img_el.get_attribute('src') if img_el else ''
-                                if not photo_url and img_el:
-                                    photo_url = img_el.get_attribute('data-src') or ''
-                                
-                                cleaned_cand = clean_hotel_name(name)
-                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
-                                similarity = int(ratio * 100)
-                                is_fab = 'fab' in name.lower()
-                                
-                                cand = {
-                                    'name': name,
-                                    'platform': 'Booking.com',
-                                    'address': location or self.city,
-                                    'url': url,
-                                    'photo_url': photo_url or '',
-                                    'similarity': f"{similarity}%",
-                                    'similarity_val': similarity,
-                                    'is_fab': is_fab
-                                }
-                                self.candidates.append(cand)
-                                self.candidate_found.emit(cand)
-                                count += 1
-                            except Exception:
-                                pass
-                        self.progress.emit(f"Booking.com: Found {count} properties.")
-
-                    elif platform == 'agoda':
-                        search_url = f"https://www.agoda.com/search?text={query_encoded}"
-                        page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(3000)
-
-                        cards = page.query_selector_all('li[data-selenium="property-item"], [data-selenium="hotel-item"], .PropertyCard')
-                        if not cards:
-                            cards = page.query_selector_all('div:has(a[href*="/hotel/"])')
-
-                        count = 0
-                        for card in cards[:6]:
-                            if self._stop:
-                                break
-                            try:
-                                name_el = card.query_selector('[data-selenium="hotel-name"], h3, h4, .property-card-title')
+                                img_el = card.query_selector('img[data-testid="image"], img')
+                                first_photo = img_el.get_attribute('src') if img_el else ''
+                            elif platform == 'agoda':
+                                name_el = card.query_selector('[data-selenium="hotel-name"], h3, .property-card-title')
                                 name = name_el.inner_text().strip() if name_el else ''
-                                if not name:
-                                    continue
-
-                                loc_el = card.query_selector('[data-selenium="area-city-name"], .property-card-location, span[class*="location"]')
+                                loc_el = card.query_selector('[data-selenium="area-city-name"], .property-card-location')
                                 location = loc_el.inner_text().strip() if loc_el else ''
-
                                 link_el = card.query_selector('a[href*="/hotel/"], a')
                                 url = link_el.get_attribute('href') if link_el else ''
                                 if url and url.startswith('/'):
                                     url = "https://www.agoda.com" + url
-                                if url:
-                                    url = url.split('?')[0]
-
-                                img_el = card.query_selector('img[src*="hotel"], img[src*="images"], img')
-                                photo_url = img_el.get_attribute('src') if img_el else ''
-                                if not photo_url and img_el:
-                                    photo_url = img_el.get_attribute('data-src') or ''
-
-                                cleaned_cand = clean_hotel_name(name)
-                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
-                                similarity = int(ratio * 100)
-                                is_fab = 'fab' in name.lower()
-
-                                cand = {
-                                    'name': name,
-                                    'platform': 'Agoda',
-                                    'address': location or self.city,
-                                    'url': url,
-                                    'photo_url': photo_url or '',
-                                    'similarity': f"{similarity}%",
-                                    'similarity_val': similarity,
-                                    'is_fab': is_fab
-                                }
-                                self.candidates.append(cand)
-                                self.candidate_found.emit(cand)
-                                count += 1
-                            except Exception:
-                                pass
-                        self.progress.emit(f"Agoda: Found {count} properties.")
-
-                    elif platform == 'expedia':
-                        search_url = f"https://www.expedia.com/Hotel-Search?destination={query_encoded}"
-                        page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(3000)
-
-                        cards = page.query_selector_all('[data-stid="property-card"], .uitk-card, [class*="PropertyCard"]')
-                        if not cards:
-                            cards = page.query_selector_all('div:has(a[href*="/h"])')
-
-                        count = 0
-                        for card in cards[:6]:
-                            if self._stop:
-                                break
-                            try:
-                                name_el = card.query_selector('h3, h4, [class*="Title"]')
+                                img_el = card.query_selector('img')
+                                first_photo = img_el.get_attribute('src') if img_el else ''
+                            elif platform == 'expedia':
+                                name_el = card.query_selector('h3, h4')
                                 name = name_el.inner_text().strip() if name_el else ''
-                                if not name:
-                                    continue
-
-                                loc_el = card.query_selector('[data-test-id="neighborhood"], [class*="Neighborhood"], [class*="Location"]')
+                                loc_el = card.query_selector('[data-test-id="neighborhood"]')
                                 location = loc_el.inner_text().strip() if loc_el else ''
-
-                                link_el = card.query_selector('a[href*="Hotel-Information"], a')
+                                link_el = card.query_selector('a')
                                 url = link_el.get_attribute('href') if link_el else ''
                                 if url and url.startswith('/'):
                                     url = "https://www.expedia.com" + url
-                                if url:
-                                    url = url.split('?')[0]
-
                                 img_el = card.query_selector('img')
-                                photo_url = img_el.get_attribute('src') if img_el else ''
-                                if not photo_url and img_el:
-                                    photo_url = img_el.get_attribute('data-src') or ''
-
-                                cleaned_cand = clean_hotel_name(name)
-                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
-                                similarity = int(ratio * 100)
-                                is_fab = 'fab' in name.lower()
-
-                                cand = {
-                                    'name': name,
-                                    'platform': 'Expedia',
-                                    'address': location or self.city,
-                                    'url': url,
-                                    'photo_url': photo_url or '',
-                                    'similarity': f"{similarity}%",
-                                    'similarity_val': similarity,
-                                    'is_fab': is_fab
-                                }
-                                self.candidates.append(cand)
-                                self.candidate_found.emit(cand)
-                                count += 1
-                            except Exception:
-                                pass
-                        self.progress.emit(f"Expedia: Found {count} properties.")
-
-                    elif platform == 'mmt':
-                        search_url = f"https://www.makemytrip.com/hotels/hotel-listing/?searchText={query_encoded}"
-                        page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(3000)
-
-                        cards = page.query_selector_all('.infinite-scroll-component > div, [class*="ListingCard"], .makeFlex:has(a)')
-                        if not cards:
-                            cards = page.query_selector_all('div:has(a[href*="details"])')
-
-                        count = 0
-                        for card in cards[:6]:
-                            if self._stop:
-                                break
-                            try:
+                                first_photo = img_el.get_attribute('src') if img_el else ''
+                            elif platform == 'mmt':
                                 name_el = card.query_selector('p[class*="hotelName"], h3, span[class*="hotelName"]')
                                 name = name_el.inner_text().strip() if name_el else ''
-                                if not name:
-                                    continue
-
-                                loc_el = card.query_selector('span[class*="location"], p[class*="location"]')
+                                loc_el = card.query_selector('span[class*="location"]')
                                 location = loc_el.inner_text().strip() if loc_el else ''
-
-                                link_el = card.query_selector('a[href*="details"], a')
+                                link_el = card.query_selector('a')
                                 url = link_el.get_attribute('href') if link_el else ''
                                 if url and url.startswith('/'):
                                     url = "https://www.makemytrip.com" + url
-                                if url:
-                                    url = url.split('?')[0]
-
                                 img_el = card.query_selector('img')
-                                photo_url = img_el.get_attribute('src') if img_el else ''
+                                first_photo = img_el.get_attribute('src') if img_el else ''
 
-                                cleaned_cand = clean_hotel_name(name)
-                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
-                                similarity = int(ratio * 100)
-                                is_fab = 'fab' in name.lower()
+                            if url:
+                                url = url.split('?')[0]
+                            if not name:
+                                continue
 
-                                cand = {
-                                    'name': name,
-                                    'platform': 'MakeMyTrip',
-                                    'address': location or self.city,
-                                    'url': url,
-                                    'photo_url': photo_url or '',
-                                    'similarity': f"{similarity}%",
-                                    'similarity_val': similarity,
-                                    'is_fab': is_fab
+                            # Clean candidate name of Devanagari/Hindi/New Window texts
+                            name = clean_hotel_name(name)
+                            cleaned_cand = name
+
+                            # Exclude exact target/self matches
+                            ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
+                            similarity = int(ratio * 100)
+
+                            # Skip self-match check
+                            if similarity >= 99 and (url == target_url or (platform == 'booking' and target_url)):
+                                # Avoid marking reference hotel as its own duplicate candidate
+                                continue
+
+                            # Navigate details page for the candidate to fetch up to 10 photos
+                            cand_photos = []
+                            cand_hashes = []
+                            try:
+                                cand_page = context.new_page()
+                                cand_page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                                cand_page.wait_for_timeout(1000)
+                                
+                                img_selectors = {
+                                    'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img',
+                                    'agoda': '.PropertyGallery img, img[src*="images/hotel"], img[src*="agoda.com"]',
+                                    'expedia': '[data-stid="gallery-image"] img, img[src*="expedia.com"], .media-gallery img',
+                                    'mmt': 'img[id*="detpg_"], img[src*="hotel"], .gallery img'
                                 }
-                                self.candidates.append(cand)
-                                self.candidate_found.emit(cand)
-                                count += 1
+                                sel = img_selectors.get(platform, 'img')
+                                for img in cand_page.query_selector_all(sel):
+                                    src = img.get_attribute('src') or img.get_attribute('data-src') or img.get_attribute('data-lazy')
+                                    if src and src not in cand_photos:
+                                        if src.startswith('//'): src = 'https:' + src
+                                        cand_photos.append(src)
+                                        if len(cand_photos) >= 10:
+                                            break
+                                cand_page.close()
                             except Exception:
                                 pass
-                        self.progress.emit(f"MakeMyTrip: Found {count} properties.")
 
-                except Exception as e:
-                    self.progress.emit(f"Error searching {platform.upper()}: {str(e)[:60]}")
+                            if not cand_photos and first_photo:
+                                cand_photos.append(first_photo)
+
+                            # Match hashes to find best visual similarity
+                            match_count = 0
+                            for curl in cand_photos:
+                                cb = self.download_image_bytes(curl)
+                                if cb:
+                                    ch = self.calculate_dhash(cb)
+                                    if ch:
+                                        # Check if it matches any target hash at >= 95%
+                                        best_sim = max([self.dhash_similarity(ch, th) for th in target_hashes]) if target_hashes else 0.0
+                                        if best_sim >= 0.95:
+                                            match_count += 1
+
+                            photo_match_score = f"{match_count}/{max(1, len(cand_photos))} matched at 95%+"
+                            
+                            cand = {
+                                'name': name,
+                                'platform': platform.capitalize() if platform != 'mmt' else 'MakeMyTrip',
+                                'address': location or self.city,
+                                'url': url,
+                                'photo_url': first_photo or (cand_photos[0] if cand_photos else ''),
+                                'photos': cand_photos,
+                                'similarity': f"{similarity}%",
+                                'similarity_val': similarity,
+                                'photo_match_score': photo_match_score
+                            }
+                            self.candidates.append(cand)
+                            self.candidate_found.emit(cand)
+                        except Exception as ce:
+                            print(f"Error parsing card details: {ce}")
+                except Exception as pe:
+                    self.progress.emit(f"Error scraping {platform.upper()}: {pe}")
 
             try:
                 browser.close()
             except Exception:
                 pass
 
-        self.progress.emit("Multi-platform search finished.")
+        self.progress.emit("Search finished.")
         self.finished.emit(self.candidates)
 
 
 # ── Clean Hotel Name Helper (FabHotels Duplicate Checking) ──
 
 def clean_hotel_name(name: str) -> str:
-    """Strip common brand prefixes like FabHotel, FabHotels, FabExpress, Fab to find duplicate candidates."""
+    """Strip common brand prefixes and Devanagari/Hindi characters and window texts."""
     if not name:
         return ""
-    cleaned = re.sub(r'\b(?:fabhotel|fabhotels|fabexpress|fab)\b', '', name, flags=re.IGNORECASE)
-    return re.sub(r'\s+', ' ', cleaned).strip()
+    # Strip Hindi phrases and Devanagari characters
+    name = re.sub(r'नई\s+विंडो\s+में\s+खुलता\s+है', '', name)
+    name = re.sub(r'[\u0900-\u097F]+', '', name)
+    # Strip common window/open texts
+    name = re.sub(r'(?i)\b(?:opens\s+in\s+(?:a\s+)?new\s+window|opens\s+new\s+window)\b', '', name)
+    # Strip common brand prefixes/suffixes
+    name = re.sub(r'\b(?:fabhotel|fabhotels|fabexpress|fab)\b', '', name, flags=re.IGNORECASE)
+    # Clean whitespace
+    return re.sub(r'\s+', ' ', name).strip()
+
 
 
 # ── Link Builder ──────────────────────────────────────────
@@ -1555,6 +1618,12 @@ class GodModeTab(QWidget):
         self.parallel_table.horizontalHeader().setStretchLastSection(True)
         self.parallel_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         results_layout.addWidget(self.parallel_table)
+
+        # Copy Results for Excel button
+        self.parallel_copy_btn = QPushButton("Copy Results for Excel / Google Sheets")
+        self.parallel_copy_btn.setStyleSheet("background-color: #27ae60; font-weight: bold; padding: 10px; margin-top: 5px;")
+        self.parallel_copy_btn.clicked.connect(self.copy_parallel_results_to_clipboard)
+        results_layout.addWidget(self.parallel_copy_btn)
 
         left_layout.addWidget(results_group, 1)
 
@@ -2102,8 +2171,9 @@ class GodModeTab(QWidget):
         self.parallel_table.setItem(row, 2, QTableWidgetItem(candidate['address']))
         self.parallel_table.setItem(row, 3, QTableWidgetItem(candidate['similarity']))
         
-        # Photo match audit status
-        self.parallel_table.setItem(row, 4, QTableWidgetItem("Not Audited"))
+        # Photo match score
+        pm_score = candidate.get('photo_match_score', 'Not Audited')
+        self.parallel_table.setItem(row, 4, QTableWidgetItem(pm_score))
         
         # Action button
         btn = QPushButton("Compare Photos")
@@ -2131,13 +2201,42 @@ class GodModeTab(QWidget):
             item = self.parallel_table.item(row, 4)
             if item:
                 if action == 'duplicate':
-                    item.setText("❌ DUPLICATE")
+                    item.setText(f"❌ DUPLICATE ({candidate.get('photo_match_score', '')})")
                     item.setForeground(Qt.GlobalColor.red)
                     self.parallel_log.append(f"Row #{row+1} Marked as DUPLICATE listing.")
                 elif action == 'safe':
-                    item.setText("✅ SAFE")
+                    item.setText(f"✅ SAFE ({candidate.get('photo_match_score', '')})")
                     item.setForeground(Qt.GlobalColor.green)
                     self.parallel_log.append(f"Row #{row+1} Marked as SAFE / Unique listing.")
+
+    def copy_parallel_results_to_clipboard(self):
+        import subprocess
+        lines = []
+        # Header
+        lines.append("Candidate Hotel Name\tPlatform\tAddress / Location\tName Similarity\tPhoto Match\tDetail Link\tFirst Photo Link")
+        
+        for cand in self.parallel_candidates:
+            name = cand.get('name', '')
+            platform = cand.get('platform', '')
+            address = cand.get('address', '')
+            similarity = cand.get('similarity', '')
+            photo_match = cand.get('photo_match_score', 'Not Audited')
+            url = cand.get('url', '')
+            photo_url = cand.get('photo_url', '')
+            
+            # Excel formula for hyperlinks
+            url_formula = f'=HYPERLINK("{url}", "View Listing")' if url else ''
+            photo_formula = f'=HYPERLINK("{photo_url}", "View Photo")' if photo_url else ''
+            
+            lines.append(f"{name}\t{platform}\t{address}\t{similarity}\t{photo_match}\t{url_formula}\t{photo_formula}")
+            
+        if lines:
+            text = '\n'.join(lines)
+            try:
+                subprocess.run(['clip'], input=text.encode('utf-16-le'), check=True)
+                self.parallel_log.append("Copied results table with embedded links to clipboard!")
+            except Exception as e:
+                self.parallel_log.append(f"Failed to copy to clipboard: {e}")
 
 
     # ── Samples & Utilities ──────────────────────────────────────

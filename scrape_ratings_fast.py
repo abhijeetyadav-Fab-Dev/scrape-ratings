@@ -3,6 +3,10 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from playwright.sync_api import sync_playwright
 
+# If running as a PyInstaller bundle, force Playwright to use the system-wide browser installation
+if getattr(sys, 'frozen', False):
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '0'
+
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 

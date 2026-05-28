@@ -18,10 +18,14 @@ How to add a new source:
   4. Register it in EXTRANET_SOURCES
 """
 
-import os, csv, json, time, re, threading, subprocess, pickle, sqlite3
+import sys, os, csv, json, time, re, threading, subprocess, pickle, sqlite3
 from pathlib import Path
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
+
+# Set Playwright browser path to the user's local ms-playwright folder if running as a frozen executable
+if getattr(sys, 'frozen', False):
+    os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(Path.home() / "AppData" / "Local" / "ms-playwright")
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -47,8 +51,30 @@ GOIBIBO_EXTRANET_COOKIES = COOKIES_DIR / "goibibo_extranet_cookies.pkl"
 AGODA_EXTRANET_COOKIES = COOKIES_DIR / "agoda_extranet_cookies.pkl"
 EXPEDIA_EXTRANET_COOKIES = COOKIES_DIR / "expedia_extranet_cookies.pkl"
 
+
 # Shared Chrome debug port (different from ratings scraper's 9222)
 EXTRANET_DEBUG_PORT = 9223
+
+def clean_row_keys(row: dict) -> dict:
+    cleaned = {}
+    prefixes = [
+        "promo_", "res_", "dash_", "rate_", "prop_", "boost_", "inb_", "rev_", "fin_", "anl_",
+        "mmt_rev_", "mmt_settlement_", "goi_rev_", "goi_settlement_", "agd_rev_", "agd_prop_",
+        "exp_rev_", "exp_prop_", "htl_rev_", "htl_prop_", "exp_ci_", "htl_ci_", "goi_rpt_",
+        "mmt_", "goi_", "agd_", "exp_", "htl_", "promo_mmt_"
+    ]
+    for k, v in row.items():
+        if k in ["hotel_id", "hotel_name", "_source", "_error"]:
+            cleaned[k] = v
+            continue
+        cleaned_key = k
+        for pref in prefixes:
+            if k.startswith(pref):
+                cleaned_key = k[len(pref):]
+                break
+        cleaned_key = cleaned_key.replace("_", " ")
+        cleaned[cleaned_key] = v
+    return cleaned
 
 # ────────────────────────────────────────────────────────────
 #  ExtranetSource — abstract base for all data-source plugins
@@ -118,7 +144,7 @@ class ExtranetSource(ABC):
         ...
 
     def _append_scraped_property_data(self, hotel_id: str, hotel_name: str, rows: list[dict], status: str = "Completed"):
-        """Shared helper to write a property's scraped rows to CSV and log to SQLite in real-time."""
+        """Shared helper to write a property's scraped rows to Excel and log to SQLite in real-time."""
         session_id = getattr(self, "session_id", None)
         out_path = getattr(self, "output_path", None)
         
@@ -129,29 +155,54 @@ class ExtranetSource(ABC):
             except Exception:
                 pass
                 
-        # 2. Append to CSV in real-time
+        # 2. Append to file in real-time
         if out_path and rows:
             try:
-                file_exists = os.path.exists(out_path) and os.path.getsize(out_path) > 0
-                
+                # Clean row keys first
+                cleaned_rows = [clean_row_keys(r) for r in rows]
+
                 # Construct ordered keys from job or dynamic discovery
                 field_keys = []
                 if getattr(self, "job", None):
-                    field_keys = [f["key"] for f in self.job.selected_fields]
+                    field_keys = [clean_row_keys({f["key"]: ""}).popitem()[0] for f in self.job.selected_fields]
                 else:
                     all_keys = set()
-                    for r in rows:
+                    for r in cleaned_rows:
                         all_keys.update(r.keys())
                     for k in ["hotel_id", "hotel_name", "_source", "_error"]:
                         all_keys.discard(k)
                     field_keys = sorted(list(all_keys))
-                o_keys = field_keys + ["hotel_id", "hotel_name", "_source", "_error"]
-                
-                with open(out_path, "a", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=o_keys, extrasaction="ignore")
-                    if not file_exists:
-                        writer.writeheader()
-                    writer.writerows(rows)
+
+                # Deduplicate columns to prevent duplicate hotel_id/hotel_name headers
+                o_keys = []
+                for k in field_keys:
+                    if k not in o_keys:
+                        o_keys.append(k)
+                for k in ["hotel_id", "hotel_name", "_source", "_error"]:
+                    if k not in o_keys:
+                        o_keys.append(k)
+
+                if out_path.lower().endswith(".xlsx"):
+                    from openpyxl import Workbook, load_workbook
+                    if os.path.exists(out_path):
+                        wb = load_workbook(out_path)
+                        ws = wb.active
+                    else:
+                        wb = Workbook()
+                        ws = wb.active
+                        ws.append(o_keys)
+                    
+                    for r in cleaned_rows:
+                        row_data = [r.get(k, "") for k in o_keys]
+                        ws.append(row_data)
+                    wb.save(out_path)
+                else:
+                    file_exists = os.path.exists(out_path) and os.path.getsize(out_path) > 0
+                    with open(out_path, "a", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=o_keys, extrasaction="ignore")
+                        if not file_exists:
+                            writer.writeheader()
+                        writer.writerows(cleaned_rows)
             except Exception:
                 pass
 
@@ -430,9 +481,12 @@ class BookingExtranetSource(ExtranetSource):
                     {"key": "res_guest_name",     "label": "Guest Name"},
                     {"key": "res_check_in",       "label": "Check-in Date"},
                     {"key": "res_check_out",      "label": "Check-out Date"},
+                    {"key": "res_booked_date",     "label": "Booking Date"},
+                    {"key": "res_number_of_guests","label": "Number of guests"},
                     {"key": "res_room_type",      "label": "Room Type"},
                     {"key": "res_status",         "label": "Booking Status"},
                     {"key": "res_total_price",    "label": "Total Price"},
+                    {"key": "res_commission",     "label": "Commission"},
                     {"key": "res_balance",        "label": "Balance Due"},
                     {"key": "res_booking_id",     "label": "Booking ID / Confirmation"},
                 ]
@@ -445,6 +499,8 @@ class BookingExtranetSource(ExtranetSource):
                     {"key": "rate_plan_price",      "label": "Rate Plan Price"},
                     {"key": "rate_room_type",       "label": "Room Type"},
                     {"key": "rate_availability",    "label": "Available Rooms"},
+                    {"key": "rate_allotment",       "label": "Allotment"},
+                    {"key": "rate_booked",          "label": "Booked Rooms"},
                     {"key": "rate_los_min",         "label": "Min Length of Stay"},
                     {"key": "rate_los_max",         "label": "Max Length of Stay"},
                     {"key": "rate_restrictions",    "label": "Restrictions (CTA, closed-to-arrival)"},
@@ -475,6 +531,10 @@ class BookingExtranetSource(ExtranetSource):
                     {"key": "boost_genius_tier",       "label": "Genius Tier"},
                     {"key": "boost_conversion_rate",   "label": "Conversion Rate"},
                     {"key": "boost_competitor_rank",   "label": "Competitor Rank"},
+                    {"key": "boost_search_views",      "label": "Search Results Views"},
+                    {"key": "boost_property_views",    "label": "Property Page Views"},
+                    {"key": "boost_bookings",          "label": "Bookings Received"},
+                    {"key": "boost_cancellations",     "label": "Cancellations"},
                 ]
             },
             {
@@ -482,6 +542,7 @@ class BookingExtranetSource(ExtranetSource):
                 "section": "inbox",
                 "fields": [
                     {"key": "inb_guest_name",   "label": "Guest Name"},
+                    {"key": "inb_reservation_id", "label": "Reservation ID"},
                     {"key": "inb_subject",      "label": "Message Subject"},
                     {"key": "inb_message",      "label": "Message Body"},
                     {"key": "inb_date",         "label": "Message Date"},
@@ -506,7 +567,10 @@ class BookingExtranetSource(ExtranetSource):
                 "fields": [
                     {"key": "fin_payout_amount", "label": "Payout Amount"},
                     {"key": "fin_payout_date",   "label": "Payout Date"},
+                    {"key": "fin_gross_amount",   "label": "Gross Amount"},
+                    {"key": "fin_net_amount",     "label": "Net Amount"},
                     {"key": "fin_commission",    "label": "Commission"},
+                    {"key": "fin_payment_type",   "label": "Payment/Payout Type"},
                     {"key": "fin_invoice_id",    "label": "Invoice ID"},
                     {"key": "fin_status",        "label": "Payment Status"},
                 ]
@@ -515,32 +579,42 @@ class BookingExtranetSource(ExtranetSource):
                 "group": "Analytics",
                 "section": "analytics",
                 "fields": [
+                    {"key": "anl_sales_revenue",  "label": "Sales Revenue"},
+                    {"key": "anl_room_nights",    "label": "Room Nights Sold"},
+                    {"key": "anl_adr",            "label": "ADR"},
+                    {"key": "anl_cancellations",  "label": "Cancellations"},
                     {"key": "anl_page_views",     "label": "Page Views"},
                     {"key": "anl_click_through",  "label": "Click-Through Rate"},
                     {"key": "anl_booking_demand", "label": "Booking Demand"},
                     {"key": "anl_market_share",   "label": "Market Share"},
                     {"key": "anl_competitor_pricing", "label": "Competitor Pricing"},
                     {"key": "anl_booking_window", "label": "Booking Window (days ahead)"},
+                    {"key": "anl_country",        "label": "Top Country of Origin"},
+                    {"key": "anl_device",         "label": "Top Device Type"},
+                    {"key": "anl_traveler",       "label": "Top Traveler Type"},
                 ]
             },
             {
                 "group": "Promotions / Offers",
                 "section": "promotions",
                 "fields": [
-                    {"key": "promo_name",          "label": "Promotion Name"},
-                    {"key": "promo_type",          "label": "Promotion Type"},
-                    {"key": "promo_discount",      "label": "Discount % / Amount"},
-                    {"key": "promo_valid_from",    "label": "Valid From"},
-                    {"key": "promo_valid_to",      "label": "Valid To"},
-                    {"key": "promo_conditions",    "label": "Terms & Conditions"},
-                    {"key": "promo_status",        "label": "Status"},
+                    {"key": "promo_Name",                  "label": "Name"},
+                    {"key": "promo_Discount",              "label": "Discount"},
+                    {"key": "promo_Bookable_period",       "label": "Bookable period"},
+                    {"key": "promo_Stay_dates",            "label": "Stay dates"},
+                    {"key": "promo_Bookings",              "label": "Bookings"},
+                    {"key": "promo_Room_nights",           "label": "Room nights"},
+                    {"key": "promo_Average_daily_rate",    "label": "Average daily rate"},
+                    {"key": "promo_Revenue",               "label": "Revenue"},
+                    {"key": "promo_Cancelled_room_nights", "label": "Cancelled room nights"},
+                    {"key": "promo_Status",                "label": "Status"},
                 ]
             },
         ]
 
     def login(self, page):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def navigate_to_section(self, page, section_key: str) -> None:
         # Check if we are on the Group Homepage
@@ -680,7 +754,7 @@ class BookingExtranetSource(ExtranetSource):
             # Check if we are already on a login or error page. If so, don't trigger redundant page loads
             if "login" not in page.url.lower():
                 page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
-                time.sleep(4)
+                page.wait_for_timeout(1000)
             current_url = page.url
             ses_match = re.search(r'ses=([a-f0-9]+)', current_url)
             account_match = re.search(r'hotel_account_id=(\d+)', current_url)
@@ -718,7 +792,7 @@ class BookingExtranetSource(ExtranetSource):
         }
         url = section_map.get(section_key, base)
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     # ── Section-aware field extraction ──────────────────────
 
@@ -969,6 +1043,7 @@ class BookingExtranetSource(ExtranetSource):
         table_rows = self._extract_table_fields(page, field_keys, {
             "guest": "inb_guest_name", "name": "inb_guest_name",
             "from": "inb_guest_name", "sender": "inb_guest_name",
+            "reservation": "inb_reservation_id", "booking": "inb_reservation_id", "id": "inb_reservation_id",
             "subject": "inb_subject", "message": "inb_message",
             "date": "inb_date", "time": "inb_date",
             "status": "inb_status", "read": "inb_status", "unread": "inb_status",
@@ -1025,6 +1100,10 @@ class BookingExtranetSource(ExtranetSource):
                 "genius": "boost_genius_tier",
                 "conversion": "boost_conversion_rate",
                 "competitor": "boost_competitor_rank", "rank": "boost_competitor_rank",
+                "search": "boost_search_views",
+                "property views": "boost_property_views", "page views": "boost_property_views",
+                "bookings": "boost_bookings",
+                "cancellations": "boost_cancellations",
             }
             for card in cards:
                 text = card.inner_text().strip().lower()
@@ -1057,12 +1136,19 @@ class BookingExtranetSource(ExtranetSource):
                 ".bui-card, [class*='card'], [class*='widget']"
             )
             label_map = {
+                "sales": "anl_sales_revenue", "revenue": "anl_sales_revenue",
+                "room nights": "anl_room_nights", "nights sold": "anl_room_nights",
+                "adr": "anl_adr", "daily rate": "anl_adr",
+                "cancellations": "anl_cancellations", "canceled": "anl_cancellations",
                 "page views": "anl_page_views", "views": "anl_page_views",
                 "click-through": "anl_click_through", "ctr": "anl_click_through",
                 "booking demand": "anl_booking_demand", "demand": "anl_booking_demand",
                 "market share": "anl_market_share",
                 "competitor pricing": "anl_competitor_pricing", "pricing": "anl_competitor_pricing",
                 "booking window": "anl_booking_window", "window": "anl_booking_window",
+                "country": "anl_country", "origin": "anl_country",
+                "device": "anl_device", "mobile": "anl_device",
+                "traveler": "anl_traveler", "guest type": "anl_traveler",
             }
             for card in cards:
                 text = card.inner_text().strip().lower()
@@ -1102,13 +1188,16 @@ class BookingExtranetSource(ExtranetSource):
 
         # Try table-based extraction first
         table_rows = self._extract_table_fields(page, field_keys, {
-            "name": "promo_name", "promotion": "promo_name", "offer": "promo_name",
-            "type": "promo_type",
-            "discount": "promo_discount", "%": "promo_discount",
-            "from": "promo_valid_from", "valid from": "promo_valid_from",
-            "to": "promo_valid_to", "valid to": "promo_valid_to",
-            "terms": "promo_conditions", "conditions": "promo_conditions",
-            "status": "promo_status",
+            "name": "promo_Name", "promotion": "promo_Name", "offer": "promo_Name",
+            "discount": "promo_Discount", "%": "promo_Discount",
+            "bookable period": "promo_Bookable_period", "booking period": "promo_Bookable_period",
+            "stay dates": "promo_Stay_dates", "stay period": "promo_Stay_dates",
+            "bookings": "promo_Bookings",
+            "room nights": "promo_Room_nights", "nights": "promo_Room_nights",
+            "average daily rate": "promo_Average_daily_rate", "adr": "promo_Average_daily_rate",
+            "revenue": "promo_Revenue",
+            "cancelled room nights": "promo_Cancelled_room_nights", "cancelled nights": "promo_Cancelled_room_nights",
+            "status": "promo_Status",
         })
         if table_rows:
             return table_rows
@@ -1133,7 +1222,6 @@ class BookingExtranetSource(ExtranetSource):
                 dates = []
                 status = "Active"
                 conditions = ""
-                promo_type = "Standard"
                 
                 for idx, line in enumerate(lines):
                     l_lower = line.lower()
@@ -1151,20 +1239,23 @@ class BookingExtranetSource(ExtranetSource):
                         name = line
                         
                 # Map extracted variables to the requested field keys
-                row["promo_name"] = name or (lines[0] if lines else "Promotion")
-                row["promo_type"] = promo_type
-                row["promo_discount"] = discount or "No Discount"
+                row["promo_Name"] = name or (lines[0] if lines else "Promotion")
+                row["promo_Discount"] = discount or "No Discount"
                 if len(dates) >= 2:
-                    row["promo_valid_from"] = dates[0]
-                    row["promo_valid_to"] = dates[1]
+                    row["promo_Bookable_period"] = dates[0]
+                    row["promo_Stay_dates"] = dates[1]
                 elif len(dates) == 1:
-                    row["promo_valid_from"] = dates[0]
-                    row["promo_valid_to"] = dates[0]
+                    row["promo_Bookable_period"] = dates[0]
+                    row["promo_Stay_dates"] = "Always active"
                 else:
-                    row["promo_valid_from"] = "N/A"
-                    row["promo_valid_to"] = "N/A"
-                row["promo_conditions"] = conditions or "Standard terms"
-                row["promo_status"] = status
+                    row["promo_Bookable_period"] = "N/A"
+                    row["promo_Stay_dates"] = "Always active"
+                row["promo_Bookings"] = ""
+                row["promo_Room_nights"] = ""
+                row["promo_Average_daily_rate"] = ""
+                row["promo_Revenue"] = ""
+                row["promo_Cancelled_room_nights"] = ""
+                row["promo_Status"] = status
                 
                 if row:
                     rows.append(row)
@@ -1191,9 +1282,12 @@ class BookingExtranetSource(ExtranetSource):
                 "guest": "res_guest_name", "name": "res_guest_name",
                 "check-in": "res_check_in", "check in": "res_check_in", "arrival": "res_check_in",
                 "check-out": "res_check_out", "check out": "res_check_out", "departure": "res_check_out",
+                "booked": "res_booked_date", "booking date": "res_booked_date", "booked date": "res_booked_date",
+                "guests": "res_number_of_guests", "number of guests": "res_number_of_guests", "pax": "res_number_of_guests",
                 "room": "res_room_type", "room type": "res_room_type",
                 "status": "res_status",
                 "price": "res_total_price", "total": "res_total_price", "amount": "res_total_price",
+                "commission": "res_commission",
                 "balance": "res_balance", "due": "res_balance",
             })
             if rows:
@@ -1205,6 +1299,8 @@ class BookingExtranetSource(ExtranetSource):
                 "price": "rate_plan_price", "rate": "rate_plan_price",
                 "room": "rate_room_type", "room type": "rate_room_type",
                 "available": "rate_availability", "availability": "rate_availability",
+                "allotment": "rate_allotment", "inventory": "rate_allotment",
+                "booked": "rate_booked", "sold": "rate_booked",
                 "min": "rate_los_min", "min stay": "rate_los_min",
                 "max": "rate_los_max", "max stay": "rate_los_max",
                 "restriction": "rate_restrictions",
@@ -1243,6 +1339,9 @@ class BookingExtranetSource(ExtranetSource):
             rows = self._extract_table_fields(page, field_keys, {
                 "amount": "fin_payout_amount", "payout": "fin_payout_amount",
                 "date": "fin_payout_date", "payout date": "fin_payout_date",
+                "gross": "fin_gross_amount", "gross amount": "fin_gross_amount", "room fee": "fin_gross_amount",
+                "payment type": "fin_payment_type", "payout type": "fin_payment_type", "method": "fin_payment_type",
+                "net": "fin_net_amount", "net amount": "fin_net_amount",
                 "commission": "fin_commission",
                 "invoice": "fin_invoice_id", "id": "fin_invoice_id",
                 "status": "fin_status", "payment": "fin_status",
@@ -1396,15 +1495,22 @@ class BookingExtranetSource(ExtranetSource):
                     
                     # Dynamic wait for page contents to render (promotions table, cards, or empty state text)
                     try:
-                        page.wait_for_selector(
-                            ".promo-card, .offer-card, table, [data-promo-id], "
-                            "[class*='promo'], [class*='offer'], "
-                            "text='active promotions', text='no active promotions', "
-                            "text='Choose new promotion'",
-                            timeout=1500
-                        )
+                        wait_selectors = {
+                            "dashboard": ".dashboard-card, [class*='metric'], [class*='kpi'], table",
+                            "reservations": "table, tr, [class*='reservation']",
+                            "rates": "table, [class*='calendar'], [class*='rate']",
+                            "reviews": ".review-card, [class*='review'], table",
+                            "promotions": ".promo-card, .offer-card, table, [class*='promo']",
+                            "financial": "table, [class*='finance'], [class*='invoice']",
+                            "inbox": "[class*='message'], [class*='inbox'], table",
+                            "boost": "[class*='metric'], [class*='boost'], table",
+                            "analytics": "[class*='chart'], [class*='metric'], table",
+                            "property": "input, textarea, [class*='property'], table"
+                        }
+                        selector_to_wait = wait_selectors.get(section, "table, .bui-card, [class*='metric'], [class*='promo']")
+                        page.wait_for_selector(selector_to_wait, timeout=3000)
                     except Exception:
-                        page.wait_for_timeout(500) # fallback sleep
+                        page.wait_for_timeout(1000) # fallback sleep
                     
                     # Extract the exact property name from the actual property page!
                     exact_name = self._extract_property_name_from_page(page)
@@ -1419,6 +1525,8 @@ class BookingExtranetSource(ExtranetSource):
                         r["hotel_id"] = hotel_id
                         r["hotel_name"] = hotel_name
                         all_rows.append(r)
+                        if worker:
+                            worker.live_data.emit(r)
                         
                     # Save incremental data & update SQLite
                     self._append_scraped_property_data(hotel_id, hotel_name, rows, "Completed")
@@ -1539,7 +1647,7 @@ class MMTExtranetSource(ExtranetSource):
 
     def login(self, page):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def navigate_to_section(self, page, section_key: str) -> None:
         base = "https://hotel.makemytrip.com"
@@ -1552,7 +1660,7 @@ class MMTExtranetSource(ExtranetSource):
         }
         url = section_map.get(section_key, base)
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def _detect_section(self, field_keys: list[str]) -> str:
         """Determine which MMT section we're on by field key prefix."""
@@ -1799,7 +1907,7 @@ class GoibiboExtranetSource(ExtranetSource):
 
     def login(self, page):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def navigate_to_section(self, page, section_key: str) -> None:
         base = "https://partners.go-mmt.com"
@@ -1813,7 +1921,7 @@ class GoibiboExtranetSource(ExtranetSource):
         }
         url = section_map.get(section_key, base)
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def _detect_section(self, field_keys: list[str]) -> str:
         """Determine which Goibibo section we're on by field key prefix."""
@@ -2059,7 +2167,7 @@ class AgodaExtranetSource(ExtranetSource):
 
     def login(self, page):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def navigate_to_section(self, page, section_key: str) -> None:
         base = "https://ycs.agoda.com"
@@ -2072,7 +2180,7 @@ class AgodaExtranetSource(ExtranetSource):
         }
         url = section_map.get(section_key, base)
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def _detect_section(self, field_keys: list[str]) -> str:
         """Determine which Agoda YCS section we're on by field key prefix."""
@@ -2319,7 +2427,7 @@ class ExpediaExtranetSource(ExtranetSource):
 
     def login(self, page):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def navigate_to_section(self, page, section_key: str) -> None:
         base = "https://expediapartnercentral.com"
@@ -2333,7 +2441,7 @@ class ExpediaExtranetSource(ExtranetSource):
         }
         url = section_map.get(section_key, base)
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def _detect_section(self, field_keys: list[str]) -> str:
         """Determine which Expedia Partner Central section we're on."""
@@ -2604,7 +2712,7 @@ class HotelsExtranetSource(ExtranetSource):
 
     def login(self, page):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def navigate_to_section(self, page, section_key: str) -> None:
         base = "https://expediapartnercentral.com"
@@ -2618,7 +2726,7 @@ class HotelsExtranetSource(ExtranetSource):
         }
         url = section_map.get(section_key, base)
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        time.sleep(3)
+        page.wait_for_timeout(1000)
 
     def _detect_section(self, field_keys: list[str]) -> str:
         """Determine which Hotels.com Partner Central section we're on."""
@@ -2808,17 +2916,24 @@ class ScrapeJob:
     """A single scrape job configuration — serializable to/from JSON."""
 
     def __init__(self, source_key: str = "", selected_fields: list[dict] = None,
-                 label: str = "", output_path: str = ""):
+                 label: str = "", output_path: str = "", headless: bool = False,
+                 fast_mode: bool = False, concurrency: int = 1):
         self.source_key = source_key
         self.selected_fields = selected_fields or []
         self.label = label or f"Scrape_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.output_path = output_path or ""
+        self.headless = headless
+        self.fast_mode = fast_mode
+        self.concurrency = concurrency
 
     def to_dict(self) -> dict:
         return {
             "source": self.source_key,
             "label": self.label,
             "output_path": self.output_path,
+            "headless": self.headless,
+            "fast_mode": self.fast_mode,
+            "concurrency": self.concurrency,
             "fields": [
                 {"key": f["key"], "label": f.get("label", f["key"])}
                 for f in self.selected_fields
@@ -2832,6 +2947,9 @@ class ScrapeJob:
             selected_fields=data.get("fields", []),
             label=data.get("label", ""),
             output_path=data.get("output_path", ""),
+            headless=data.get("headless", False),
+            fast_mode=data.get("fast_mode", False),
+            concurrency=data.get("concurrency", 1),
         )
 
     @classmethod
@@ -3007,6 +3125,7 @@ class ExtranetScrapeWorker(QThread):
     finished = pyqtSignal(str, int)
     log_msg = pyqtSignal(str)
     login_required = pyqtSignal(str)
+    live_data = pyqtSignal(dict)
 
     def __init__(self, job: ScrapeJob, session_id: str = None):
         super().__init__()
@@ -3027,8 +3146,13 @@ class ExtranetScrapeWorker(QThread):
             return
 
         source_name = source.source_name
+        
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        last_year_str = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+        default_label = f"ACTIVE_promotions_report__from_{last_year_str}_to_{today_str}"
+        
         output_path = self.job.output_path or str(
-            Path.home() / "Downloads" / f"{self.job.label}.csv"
+            Path.home() / "Downloads" / f"{self.job.label or default_label}.xlsx"
         )
         
         # Set attributes on source singleton immediately (early initialization)
@@ -3046,16 +3170,27 @@ class ExtranetScrapeWorker(QThread):
         else:
             ScrapeHistoryManager.complete_session(self.session_id, "Running")
 
-        # Prepare CSV file and headers in real-time mode
-        field_keys = [f["key"] for f in self.job.selected_fields]
-        ordered_keys = field_keys + ["hotel_id", "hotel_name", "_source", "_error"]
+        # Prepare Excel file and headers in real-time mode
+        field_keys = [clean_row_keys({f["key"]: ""}).popitem()[0] for f in self.job.selected_fields]
+        ordered_keys = []
+        for k in field_keys:
+            if k not in ordered_keys:
+                ordered_keys.append(k)
+        for k in ["hotel_id", "hotel_name", "_source", "_error"]:
+            if k not in ordered_keys:
+                ordered_keys.append(k)
         
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         file_exists = os.path.exists(output_path) and os.path.getsize(output_path) > 0
         if not file_exists:
-            with open(output_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(ordered_keys)
+            try:
+                from openpyxl import Workbook
+                wb = Workbook()
+                ws = wb.active
+                ws.append(ordered_keys)
+                wb.save(output_path)
+            except Exception as e:
+                self.log_msg.emit(f"Warning: could not initialize Excel file: {e}")
 
         self.log_msg.emit(f"Starting scrape from {source_name}")
         self.progress.emit(0, 1, "Launching browser...")
@@ -3065,7 +3200,7 @@ class ExtranetScrapeWorker(QThread):
             # Use launch_persistent_context to safely maintain logins/profile persistent state
             context = pw.chromium.launch_persistent_context(
                 user_data_dir=str(COOKIES_DIR / 'chrome_extranet'),
-                headless=False,
+                headless=self.job.headless,
                 channel="chrome",
                 args=[
                     f"--remote-debugging-port={EXTRANET_DEBUG_PORT}",
@@ -3073,6 +3208,15 @@ class ExtranetScrapeWorker(QThread):
                     "--window-size=1280,900",
                 ]
             )
+
+            if getattr(self.job, 'fast_mode', False):
+                def block_resources(route):
+                    if route.request.resource_type in ["image", "stylesheet", "font", "media"]:
+                        route.abort()
+                    else:
+                        route.continue_()
+                context.route("**/*", block_resources)
+
             page = context.pages[0] if context.pages else context.new_page()
             
             # Singleton attributes already early-initialized at start of run()
@@ -3173,7 +3317,7 @@ class ExtranetScrapeWorker(QThread):
             else:
                 self.log_msg.emit(f"Navigating to {source.source_name} login page...")
                 page.goto(source.login_url, timeout=30000, wait_until="domcontentloaded")
-                time.sleep(3)
+                page.wait_for_timeout(1000)
                 self.login_required.emit(f"{source.source_name} login required.")
                 self.log_msg.emit("Chrome opened — log in and confirm in the app.")
                 self.login_event.wait()
@@ -3262,13 +3406,13 @@ class ExtranetScrapeWorker(QThread):
                     tab = context.new_page()
                     try:
                         source.navigate_to_section(tab, section_key)
-                        time.sleep(2)
+                        page.wait_for_timeout(1000)
                         rows = source.extract_data(tab, fields)
                     finally:
                         tab.close()
                 else:
                     source.navigate_to_section(page, section_key)
-                    time.sleep(2)  # let the page render
+                    page.wait_for_timeout(1000)  # let the page render
                     rows = source.extract_data(page, fields)
 
                 self.log_msg.emit(f"  → Got {len(rows)} rows from '{section_key}'")
@@ -3277,36 +3421,45 @@ class ExtranetScrapeWorker(QThread):
             context.close()
             pw.stop()
 
-            # ── Double-Safety CSV Write & Consolidation ───────────────────────────
+            # ── Double-Safety Excel Write & Consolidation ───────────────────────────
             if self._stop:
                 ScrapeHistoryManager.complete_session(self.session_id, "Interrupted")
                 self.log_msg.emit("\nScrape job stopped/interrupted by user.")
                 self.finished.emit(output_path, 0)
             elif all_rows:
-                # Read any existing rows from CSV first (for resume safety)
+                # Read any existing rows from Excel first (for resume safety)
                 existing_rows = []
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     try:
-                        with open(output_path, "r", newline="", encoding="utf-8") as f:
-                            reader = csv.DictReader(f)
-                            for r in reader:
-                                existing_rows.append(dict(r))
+                        from openpyxl import load_workbook
+                        wb = load_workbook(output_path)
+                        ws = wb.active
+                        headers = [cell.value for cell in ws[1]]
+                        for row_cells in ws.iter_rows(min_row=2, values_only=True):
+                            existing_rows.append(dict(zip(headers, row_cells)))
                     except Exception as e:
-                        self.log_msg.emit(f"Warning: could not read existing CSV for consolidation: {e}")
+                        self.log_msg.emit(f"Warning: could not read existing Excel for consolidation: {e}")
+                
+                # Clean row keys of the newly scraped rows
+                cleaned_all_rows = [clean_row_keys(r) for r in all_rows]
                 
                 # Combine: remove old rows for hotels we just scraped to prevent duplicates
-                scraped_hotel_ids = {r.get("hotel_id") for r in all_rows if r.get("hotel_id")}
+                scraped_hotel_ids = {r.get("hotel_id") for r in cleaned_all_rows if r.get("hotel_id")}
                 consolidated = [r for r in existing_rows if r.get("hotel_id") not in scraped_hotel_ids]
-                consolidated.extend(all_rows)
+                consolidated.extend(cleaned_all_rows)
                 
                 # Rewrite consolidated data
                 try:
-                    with open(output_path, "w", newline="", encoding="utf-8") as f:
-                        writer = csv.DictWriter(f, fieldnames=ordered_keys, extrasaction="ignore")
-                        writer.writeheader()
-                        writer.writerows(consolidated)
+                    from openpyxl import Workbook
+                    wb = Workbook()
+                    ws = wb.active
+                    ws.append(ordered_keys)
+                    for r in consolidated:
+                        row_data = [r.get(k, "") for k in ordered_keys]
+                        ws.append(row_data)
+                    wb.save(output_path)
                 except Exception as e:
-                    self.log_msg.emit(f"Error writing final CSV file: {e}")
+                    self.log_msg.emit(f"Error writing final Excel file: {e}")
 
                 ScrapeHistoryManager.complete_session(self.session_id, "Completed")
                 
@@ -3439,6 +3592,7 @@ class UniversalScraperTab(QWidget):
         self.fields_layout = QVBoxLayout(scroll_container)
         scroll.setWidget(scroll_container)
         scroll.setMaximumHeight(260)
+        scroll.setMinimumHeight(150)
         layout.addWidget(QLabel("Select fields to scrape:"))
         layout.addWidget(scroll)
 
@@ -3471,6 +3625,31 @@ class UniversalScraperTab(QWidget):
         self.import_config_btn.setStyleSheet("background-color: #555;")
         ctrl_row.addWidget(self.import_config_btn)
         layout.addLayout(ctrl_row)
+
+        # ── Settings & Config Panel ───────────────────────
+        settings_group = QGroupBox("Advanced Settings")
+        settings_group.setStyleSheet("QGroupBox { border: 1px solid #444; margin-top: 10px; font-weight: bold; }")
+        settings_layout = QHBoxLayout(settings_group)
+        
+        self.fast_mode_chk = QCheckBox("Enable Fast Mode (Blocks images/CSS)")
+        self.fast_mode_chk.setChecked(True)
+        self.fast_mode_chk.setToolTip("Aborts loading images, fonts, and stylesheets to massively speed up scraping.")
+        settings_layout.addWidget(self.fast_mode_chk)
+
+        self.headless_chk = QCheckBox("Headless Mode (Hide browser)")
+        self.headless_chk.setChecked(False)
+        settings_layout.addWidget(self.headless_chk)
+
+        from PyQt6.QtWidgets import QSpinBox
+        settings_layout.addWidget(QLabel("Concurrency limit:"))
+        self.concurrency_spin = QSpinBox()
+        self.concurrency_spin.setRange(1, 10)
+        self.concurrency_spin.setValue(1)
+        self.concurrency_spin.setToolTip("Number of parallel browser tabs to open when scraping multiple properties")
+        settings_layout.addWidget(self.concurrency_spin)
+        settings_layout.addStretch()
+
+        layout.addWidget(settings_group)
 
         # ── Run controls ──────────────────────────────────
         run_row = QHBoxLayout()
@@ -3507,13 +3686,26 @@ class UniversalScraperTab(QWidget):
         # ── Log ───────────────────────────────────────────
         self.log = QTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumHeight(150)
+        self.log.setMaximumHeight(80)
         self.log.setStyleSheet(
             "background-color: #16213e; color: #a0e0a0; border: 1px solid #333; "
             "border-radius: 4px; font-family: Consolas; font-size: 11px;"
         )
         layout.addWidget(QLabel("Log:"))
         layout.addWidget(self.log)
+
+        # ── Live Preview ──────────────────────────────────
+        self.live_preview = QTableWidget()
+        self.live_preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.live_preview.setColumnCount(4)
+        self.live_preview.setHorizontalHeaderLabels(["Hotel ID", "Name", "Key", "Value"])
+        self.live_preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.live_preview.setStyleSheet("""
+            QTableWidget { background-color: #1a1a2e; color: #e0e0e0; gridline-color: #333; border: 1px solid #333; font-size: 11px; }
+            QHeaderView::section { background-color: #0f3460; color: white; padding: 4px; border: 1px solid #333; font-weight: bold; }
+        """)
+        layout.addWidget(QLabel("Live Preview Data:"))
+        layout.addWidget(self.live_preview)
 
     def _build_history_ui(self, widget):
         layout = QVBoxLayout(widget)
@@ -3569,7 +3761,8 @@ class UniversalScraperTab(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        self.history_table.setColumnWidth(5, 180)
         self.history_table.setColumnWidth(1, 150)
         self.history_table.setColumnWidth(2, 80)
         self.history_table.setColumnWidth(3, 80)
@@ -3655,26 +3848,28 @@ class UniversalScraperTab(QWidget):
                 status_item.setForeground(Qt.GlobalColor.red)
             self.history_table.setItem(row_idx, 4, status_item)
             
+            self.history_table.setRowHeight(row_idx, 36)
+            
             # Actions cell
             actions_layout = QHBoxLayout()
-            actions_layout.setContentsMargins(2, 2, 2, 2)
-            actions_layout.setSpacing(6)
+            actions_layout.setContentsMargins(4, 2, 4, 2)
+            actions_layout.setSpacing(4)
             
-            open_btn = QPushButton("Open CSV")
-            open_btn.setStyleSheet("background-color: #27ae60; font-size: 11px; padding: 4px 8px;")
+            open_btn = QPushButton("Open Excel")
+            open_btn.setStyleSheet("background-color: #27ae60; color: white; border: none; border-radius: 4px; font-size: 11px; font-weight: bold; min-height: 22px; padding: 2px 6px;")
             out_path = h.get("output_path", "")
-            open_btn.clicked.connect(lambda checked, p=out_path: self._open_csv_file(p))
+            open_btn.clicked.connect(lambda checked, p=out_path: self._open_excel_file(p))
             actions_layout.addWidget(open_btn)
             
             resume_btn = QPushButton("Resume")
-            resume_btn.setStyleSheet("background-color: #d35400; font-size: 11px; padding: 4px 8px;")
+            resume_btn.setStyleSheet("background-color: #d35400; color: white; border: none; border-radius: 4px; font-size: 11px; font-weight: bold; min-height: 22px; padding: 2px 6px;")
             session_id = h.get("id", "")
             
             # Can resume if running/interrupted/failed and there are properties remaining to scrape
             can_resume = status in ("Interrupted", "Failed", "Running") and total_p > proc_p
             resume_btn.setEnabled(can_resume)
             if not can_resume:
-                resume_btn.setStyleSheet("background-color: #333; color: #666; font-size: 11px; padding: 4px 8px;")
+                resume_btn.setStyleSheet("background-color: #333; color: #666; border: none; border-radius: 4px; font-size: 11px; font-weight: bold; min-height: 22px; padding: 2px 6px;")
                 
             resume_btn.clicked.connect(lambda checked, s_id=session_id: self._resume_session(s_id))
             actions_layout.addWidget(resume_btn)
@@ -3683,15 +3878,15 @@ class UniversalScraperTab(QWidget):
             cell_widget.setLayout(actions_layout)
             self.history_table.setCellWidget(row_idx, 5, cell_widget)
 
-    def _open_csv_file(self, output_path: str):
+    def _open_excel_file(self, output_path: str):
         if not output_path or not os.path.exists(output_path):
-            self.log_msg(f"Error: CSV file not found at {output_path}")
+            self.log_msg(f"Error: Excel file not found at {output_path}")
             return
         try:
             os.startfile(output_path)
             self.log_msg(f"Opened file: {output_path}")
         except Exception as e:
-            self.log_msg(f"Failed to open CSV file: {e}")
+            self.log_msg(f"Failed to open Excel file: {e}")
 
     def _resume_session(self, session_id: str):
         session = ScrapeHistoryManager.get_session(session_id)
@@ -3795,7 +3990,7 @@ class UniversalScraperTab(QWidget):
                 )
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(source.login_url, timeout=30000, wait_until="domcontentloaded")
-                time.sleep(3)
+                page.wait_for_timeout(1000)
                 self.log_signal.emit(f"Chrome opened at {source.login_url}")
                 self.log_signal.emit("Log in to the browser window, then click 'Confirm Login'")
                 self.ui_signal.emit(self._show_confirm_login_button)
@@ -3916,14 +4111,25 @@ class UniversalScraperTab(QWidget):
                 self.log_msg("Select at least one field to scrape.")
                 return
 
-            label = self.label_input.toPlainText().strip() or f"scrape_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            output_path = str(Path.home() / "Downloads" / f"{label}.csv")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            last_year_str = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+            default_label = f"ACTIVE_promotions_report__from_{last_year_str}_to_{today_str}"
+
+            label = self.label_input.toPlainText().strip() or default_label
+            output_path = str(Path.home() / "Downloads" / f"{label}.xlsx")
+            
+            headless_mode = self.headless_chk.isChecked()
+            fast_mode = self.fast_mode_chk.isChecked()
+            concurrency = self.concurrency_spin.value()
 
             job = ScrapeJob(
                 source_key=source_key,
                 selected_fields=fields,
                 label=label,
                 output_path=output_path,
+                headless=headless_mode,
+                fast_mode=fast_mode,
+                concurrency=concurrency
             )
         self.current_job = job
 
@@ -3940,13 +4146,33 @@ class UniversalScraperTab(QWidget):
         self.progress.setVisible(True)
         self.progress.setMaximum(1)
         self.progress.setValue(0)
+        self.live_preview.setRowCount(0)
 
         self.worker = ExtranetScrapeWorker(job, session_id=session_id)
         self.worker.progress.connect(self._on_worker_progress)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.log_msg.connect(self.log_msg)
         self.worker.login_required.connect(self._on_worker_login_required)
+        self.worker.live_data.connect(self._on_live_data)
         self.worker.start()
+
+    def _on_live_data(self, row_data: dict):
+        # Insert a few key/value pairs from the row into the live preview table
+        hotel_id = str(row_data.get("hotel_id", ""))
+        hotel_name = str(row_data.get("hotel_name", ""))
+        
+        for k, v in row_data.items():
+            if k in ["hotel_id", "hotel_name", "_source", "_error"]:
+                continue
+            if not v:
+                continue
+            row_idx = self.live_preview.rowCount()
+            self.live_preview.insertRow(row_idx)
+            self.live_preview.setItem(row_idx, 0, QTableWidgetItem(hotel_id))
+            self.live_preview.setItem(row_idx, 1, QTableWidgetItem(hotel_name))
+            self.live_preview.setItem(row_idx, 2, QTableWidgetItem(str(k)))
+            self.live_preview.setItem(row_idx, 3, QTableWidgetItem(str(v)))
+            self.live_preview.scrollToBottom()
 
     def _stop_job(self):
         if self.worker and self.worker.isRunning():

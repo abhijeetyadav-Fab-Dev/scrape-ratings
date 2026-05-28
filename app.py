@@ -38,12 +38,12 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        self.setFixedSize(780, 780)
+        self.setMinimumSize(950, 800)
         self.setStyleSheet("""
             QMainWindow { background-color: #1a1a2e; }
             QLabel { color: #e0e0e0; }
             QPushButton { background-color: #0f3460; color: white; border: none;
-                         padding: 12px 24px; border-radius: 6px; font-size: 14px; }
+                         padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: bold; }
             QPushButton:hover { background-color: #16213e; }
             QPushButton:disabled { background-color: #333; color: #666; }
             QProgressBar { border: 1px solid #333; border-radius: 4px; text-align: center;
