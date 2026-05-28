@@ -1226,8 +1226,9 @@ def clean_hotel_name(name: str) -> str:
     # Strip Hindi phrases and Devanagari characters
     name = re.sub(r'नई\s+विंडो\s+में\s+खुलता\s+है', '', name)
     name = re.sub(r'[\u0900-\u097F]+', '', name)
-    # Strip common window/open texts
-    name = re.sub(r'(?i)\b(?:opens\s+in\s+(?:a\s+)?new\s+window|opens\s+new\s+window)\b', '', name)
+    # Strip common window/open texts (without word boundaries to catch attached text like InnOpens in new window)
+    name = re.sub(r'(?i)opens?\s*in\s*(?:a\s*)?new\s*windows?', '', name)
+    name = re.sub(r'(?i)opens?\s*new\s*windows?', '', name)
     # Strip common brand prefixes/suffixes
     name = re.sub(r'\b(?:fabhotel|fabhotels|fabexpress|fab)\b', '', name, flags=re.IGNORECASE)
     # Clean whitespace
