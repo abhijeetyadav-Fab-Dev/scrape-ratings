@@ -958,7 +958,10 @@ class ParallelListingWorker(QThread):
         import difflib
 
         cleaned_target = clean_hotel_name(self.hotel_name)
-        query = f"{cleaned_target} {self.city}".strip()
+        if self.city.lower() in cleaned_target.lower():
+            query = cleaned_target
+        else:
+            query = f"{cleaned_target} {self.city}".strip()
         query_encoded = urllib.parse.quote_plus(query)
 
         self.progress.emit(f"Launching search for '{query}'...")
@@ -967,10 +970,12 @@ class ParallelListingWorker(QThread):
             try:
                 browser = p.chromium.launch(headless=True)
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-US",
+                    timezone_id="Asia/Kolkata"
                 )
                 context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
-                page = context.new_page()
             except Exception as e:
                 self.progress.emit(f"Failed to launch browser: {e}")
                 self.finished.emit([])
@@ -983,31 +988,35 @@ class ParallelListingWorker(QThread):
             
             self.progress.emit("Obtaining reference details for target hotel...")
             try:
-                # Search booking.com to find the target details
+                # Search booking.com to find the target details using a fresh page
+                ref_page = context.new_page()
                 ss_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
-                page.goto(ss_url, timeout=20000, wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)
-                first_card = page.query_selector('[data-testid="property-card"], [data-testid="sr-property-card-common"]')
+                ref_page.goto(ss_url, timeout=20000, wait_until="domcontentloaded")
+                ref_page.wait_for_timeout(2000)
+                first_card = ref_page.query_selector('[data-testid="property-card"], [data-testid="sr-property-card-common"]')
                 if first_card:
                     link_el = first_card.query_selector('a[data-testid="title-link"], a[href*="/hotel/"]')
                     target_url = link_el.get_attribute('href') if link_el else ''
                     if target_url and target_url.startswith('/'):
                         target_url = "https://www.booking.com" + target_url
                     target_url = target_url.split('?')[0] if target_url else ""
+                ref_page.close()
             except Exception as e:
                 self.progress.emit(f"Could not automatically fetch target detail page: {e}")
 
             if target_url:
                 try:
-                    page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(1500)
-                    img_elements = page.query_selector_all('.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img')
+                    ref_page = context.new_page()
+                    ref_page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
+                    ref_page.wait_for_timeout(1500)
+                    img_elements = ref_page.query_selector_all('.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img')
                     for img in img_elements:
                         src = img.get_attribute('src') or img.get_attribute('data-lazy') or img.get_attribute('data-src')
                         if src and src not in target_photos:
                             target_photos.append(src)
                             if len(target_photos) >= 10:
                                 break
+                    ref_page.close()
                     self.progress.emit(f"Loaded {len(target_photos)} reference photos from details page.")
                 except Exception as e:
                     self.progress.emit(f"Error reading target details page gallery: {e}")
@@ -1028,6 +1037,8 @@ class ParallelListingWorker(QThread):
                 self.progress.emit(f"Searching platform: {platform.upper()}...")
                 try:
                     cards = []
+                    page = context.new_page()
+                    
                     if platform == 'booking':
                         search_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
                         page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
@@ -1176,6 +1187,8 @@ class ParallelListingWorker(QThread):
                             self.candidate_found.emit(cand)
                         except Exception as ce:
                             print(f"Error parsing card details: {ce}")
+                    
+                    page.close()
                 except Exception as pe:
                     self.progress.emit(f"Error scraping {platform.upper()}: {pe}")
 
