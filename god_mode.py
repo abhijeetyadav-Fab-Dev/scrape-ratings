@@ -1009,7 +1009,11 @@ class ParallelListingWorker(QThread):
                     ref_page = context.new_page()
                     ref_page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
                     ref_page.wait_for_timeout(1500)
-                    img_elements = ref_page.query_selector_all('.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img')
+                    img_elements = ref_page.query_selector_all('.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo')
+                    if not img_elements:
+                        img_elements = ref_page.query_selector_all('img[src*="images/hotel"], img[src*="max1280x900"], img[src*="max500"], img[src*="square60"]')
+                    if not img_elements:
+                        img_elements = [el for el in ref_page.query_selector_all('img') if el.get_attribute('src') and ('hotel' in el.get_attribute('src').lower() or 'max' in el.get_attribute('src').lower())]
                     for img in img_elements:
                         src = img.get_attribute('src') or img.get_attribute('data-lazy') or img.get_attribute('data-src')
                         if src and src not in target_photos:
@@ -1138,13 +1142,20 @@ class ParallelListingWorker(QThread):
                                 cand_page.wait_for_timeout(1000)
                                 
                                 img_selectors = {
-                                    'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img',
+                                    'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo',
                                     'agoda': '.PropertyGallery img, img[src*="images/hotel"], img[src*="agoda.com"]',
                                     'expedia': '[data-stid="gallery-image"] img, img[src*="expedia.com"], .media-gallery img',
                                     'mmt': 'img[id*="detpg_"], img[src*="hotel"], .gallery img'
                                 }
                                 sel = img_selectors.get(platform, 'img')
-                                for img in cand_page.query_selector_all(sel):
+                                img_els = cand_page.query_selector_all(sel)
+                                if not img_els:
+                                    # Fallback
+                                    img_els = cand_page.query_selector_all('img[src*="hotel"], img[src*="max"], img[src*="images/hotel"]')
+                                if not img_els:
+                                    img_els = [el for el in cand_page.query_selector_all('img') if el.get_attribute('src') and ('hotel' in el.get_attribute('src').lower() or 'max' in el.get_attribute('src').lower())]
+                                
+                                for img in img_els:
                                     src = img.get_attribute('src') or img.get_attribute('data-src') or img.get_attribute('data-lazy')
                                     if src and src not in cand_photos:
                                         if src.startswith('//'): src = 'https:' + src
