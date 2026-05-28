@@ -981,59 +981,11 @@ class ParallelListingWorker(QThread):
                 self.finished.emit([])
                 return
 
-            # 1. Fetch Target / Reference Listing Photos first
             target_photos = []
             target_hashes = []
             target_url = ""
-            
-            self.progress.emit("Obtaining reference details for target hotel...")
-            try:
-                # Search booking.com to find the target details using a fresh page
-                ref_page = context.new_page()
-                ss_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
-                ref_page.goto(ss_url, timeout=20000, wait_until="domcontentloaded")
-                ref_page.wait_for_timeout(2000)
-                first_card = ref_page.query_selector('[data-testid="property-card"], [data-testid="sr-property-card-common"]')
-                if first_card:
-                    link_el = first_card.query_selector('a[data-testid="title-link"], a[href*="/hotel/"]')
-                    target_url = link_el.get_attribute('href') if link_el else ''
-                    if target_url and target_url.startswith('/'):
-                        target_url = "https://www.booking.com" + target_url
-                    target_url = target_url.split('?')[0] if target_url else ""
-                ref_page.close()
-            except Exception as e:
-                self.progress.emit(f"Could not automatically fetch target detail page: {e}")
 
-            if target_url:
-                try:
-                    ref_page = context.new_page()
-                    ref_page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
-                    ref_page.wait_for_timeout(1500)
-                    img_elements = ref_page.query_selector_all('.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo')
-                    if not img_elements:
-                        img_elements = ref_page.query_selector_all('img[src*="images/hotel"], img[src*="max1280x900"], img[src*="max500"], img[src*="square60"]')
-                    if not img_elements:
-                        img_elements = [el for el in ref_page.query_selector_all('img') if el.get_attribute('src') and ('hotel' in el.get_attribute('src').lower() or 'max' in el.get_attribute('src').lower())]
-                    for img in img_elements:
-                        src = img.get_attribute('src') or img.get_attribute('data-lazy') or img.get_attribute('data-src')
-                        if src and src not in target_photos:
-                            target_photos.append(src)
-                            if len(target_photos) >= 10:
-                                break
-                    ref_page.close()
-                    self.progress.emit(f"Loaded {len(target_photos)} reference photos from details page.")
-                except Exception as e:
-                    self.progress.emit(f"Error reading target details page gallery: {e}")
-
-            # Calculate hashes for reference photos
-            for url in target_photos:
-                ib = self.download_image_bytes(url)
-                if ib:
-                    h = self.calculate_dhash(ib)
-                    if h:
-                        target_hashes.append(h)
-
-            # 2. Iterate platforms to scan for candidates
+            # Iterate platforms to scan for candidates
             for platform in self.platforms:
                 if self._stop:
                     break
@@ -1138,8 +1090,51 @@ class ParallelListingWorker(QThread):
                             ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
                             similarity = int(ratio * 100)
 
+                            # First card found becomes the Target Reference Property if we don't have one!
+                            is_reference_hotel = False
+                            if not target_url:
+                                target_url = url
+                                self.progress.emit(f"Designated target reference hotel: {name} ({platform.upper()})")
+                                is_reference_hotel = True
+                                # Fetch details photos for target
+                                try:
+                                    ref_page = context.new_page()
+                                    ref_page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                                    ref_page.wait_for_timeout(1000)
+                                    img_selectors = {
+                                        'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo',
+                                        'agoda': '.PropertyGallery img, img[src*="images/hotel"], img[src*="agoda.com"]',
+                                        'expedia': '[data-stid="gallery-image"] img, img[src*="expedia.com"], .media-gallery img',
+                                        'mmt': 'img[id*="detpg_"], img[src*="hotel"], .gallery img'
+                                    }
+                                    sel = img_selectors.get(platform, 'img')
+                                    img_els = ref_page.query_selector_all(sel)
+                                    if not img_els:
+                                        img_els = ref_page.query_selector_all('img[src*="hotel"], img[src*="max"], img[src*="images/hotel"]')
+                                    if not img_els:
+                                        img_els = [el for el in ref_page.query_selector_all('img') if el.get_attribute('src') and ('hotel' in el.get_attribute('src').lower() or 'max' in el.get_attribute('src').lower())]
+                                    for img in img_els:
+                                        src = img.get_attribute('src') or img.get_attribute('data-src') or img.get_attribute('data-lazy')
+                                        if src and src not in target_photos:
+                                            if src.startswith('//'): src = 'https:' + src
+                                            target_photos.append(src)
+                                            if len(target_photos) >= 10:
+                                                break
+                                    ref_page.close()
+                                    self.progress.emit(f"Loaded {len(target_photos)} reference photos from details page.")
+                                except Exception as e:
+                                    self.progress.emit(f"Error loading reference photos: {e}")
+                                
+                                # Compute target hashes
+                                for t_url in target_photos:
+                                    ib = self.download_image_bytes(t_url)
+                                    if ib:
+                                        h = self.calculate_dhash(ib)
+                                        if h:
+                                            target_hashes.append(h)
+
                             # Skip self-match check
-                            if similarity >= 99 and (url == target_url or (platform == 'booking' and target_url)):
+                            if not is_reference_hotel and (url == target_url or similarity >= 99):
                                 # Avoid marking reference hotel as its own duplicate candidate
                                 continue
 
