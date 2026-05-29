@@ -33,6 +33,7 @@ MMT_COOKIES = COOKIES_DIR / "mmt_cookies.pkl"
 # ── Thread-local browser pool for concurrent headless scraping ──────────────
 
 _browser_lock = threading.Lock()
+_cdp_lock = threading.Lock()
 _thread_local = threading.local()
 _all_thread_browsers = []
 _all_thread_pw_managers = []
@@ -406,7 +407,7 @@ class MMTPlatform(RatingPlatform):
             ])
             time.sleep(3)
             pw = sync_playwright().start()
-            browser = pw.chromium.connect_over_cdp(f"http://localhost:{debug_port}")
+            browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
             context = browser.contexts[0]
             cookies = context.cookies(["https://www.makemytrip.com"])
             with open(MMT_COOKIES, 'wb') as f:
@@ -457,7 +458,7 @@ class MMTPlatform(RatingPlatform):
         # 3. Connect thread-local manager to CDP
         if not hasattr(_thread_local, 'mmt_browser') or _thread_local.mmt_browser is None or not _thread_local.mmt_browser.is_connected():
             try:
-                b = _thread_local.pw_manager.chromium.connect_over_cdp("http://localhost:9222")
+                b = _thread_local.pw_manager.chromium.connect_over_cdp("http://127.0.0.1:9222")
                 _thread_local.mmt_browser = b
                 if MMT_COOKIES.exists():
                     with open(MMT_COOKIES, 'rb') as f:
@@ -486,40 +487,41 @@ class MMTPlatform(RatingPlatform):
         if not browser:
             return None, None, 'browser_error'
 
-        try:
-            context = browser.contexts[0]
-            mmt_page = context.new_page()
-            url = f"https://www.makemytrip.com/hotels/hotel-details/?hotelId={hotel_id}&_uCurrency=INR&checkin=07202026&checkout=07212026&city=CTDEL&country=IN&roomStayQualifier=2e0e&locusId=CTDEL&locusType=city"
+        with _cdp_lock:
             try:
-                mmt_page.goto(url, timeout=20000, wait_until="domcontentloaded")
-            except:
-                pass
-            try:
-                mmt_page.wait_for_timeout(1000)
-            except:
-                pass
-            try:
-                mmt_page.evaluate("window.scrollBy(0, 1000)")
-            except:
-                pass
-            try:
-                mmt_page.wait_for_timeout(800)
-            except:
-                pass
+                context = browser.contexts[0]
+                mmt_page = context.new_page()
+                url = f"https://www.makemytrip.com/hotels/hotel-details/?hotelId={hotel_id}&_uCurrency=INR&checkin=07202026&checkout=07212026&city=CTDEL&country=IN&roomStayQualifier=2e0e&locusId=CTDEL&locusType=city"
+                try:
+                    mmt_page.goto(url, timeout=20000, wait_until="domcontentloaded")
+                except:
+                    pass
+                try:
+                    mmt_page.wait_for_timeout(1000)
+                except:
+                    pass
+                try:
+                    mmt_page.evaluate("window.scrollBy(0, 1000)")
+                except:
+                    pass
+                try:
+                    mmt_page.wait_for_timeout(800)
+                except:
+                    pass
 
-            content = mmt_page.content()
-            mmt_page.close()
+                content = mmt_page.content()
+                mmt_page.close()
 
-            if len(content) < 500:
-                return None, None, 'no_data'
+                if len(content) < 500:
+                    return None, None, 'no_data'
 
-            rating, review_count = extract_rating_review_count(content, scale_10=False)
-            if rating:
-                return rating, review_count or 'N/A', 'ok'
-            return rating or 'N/A', review_count or 'N/A', 'no_data'
+                rating, review_count = extract_rating_review_count(content, scale_10=False)
+                if rating:
+                    return rating, review_count or 'N/A', 'ok'
+                return rating or 'N/A', review_count or 'N/A', 'no_data'
 
-        except Exception:
-            return None, None, 'exception'
+            except Exception:
+                return None, None, 'exception'
 
     def build_url(self, input_data: dict) -> str | None:
         hotel_id = input_data.get('hotel_id', '')
@@ -648,39 +650,40 @@ class GoibiboPlatform(RatingPlatform):
         if not browser:
             return None, None, 'browser_error'
 
-        try:
-            context = browser.contexts[0]
-            gi_page = context.new_page()
+        with _cdp_lock:
             try:
-                gi_page.goto(url, timeout=25000, wait_until="domcontentloaded")
-            except:
-                pass
-            try:
-                gi_page.wait_for_timeout(2000)
-            except:
-                pass
-            try:
-                gi_page.evaluate("window.scrollBy(0, 600)")
-            except:
-                pass
-            try:
-                gi_page.wait_for_timeout(1000)
-            except:
-                pass
+                context = browser.contexts[0]
+                gi_page = context.new_page()
+                try:
+                    gi_page.goto(url, timeout=25000, wait_until="domcontentloaded")
+                except:
+                    pass
+                try:
+                    gi_page.wait_for_timeout(2000)
+                except:
+                    pass
+                try:
+                    gi_page.evaluate("window.scrollBy(0, 600)")
+                except:
+                    pass
+                try:
+                    gi_page.wait_for_timeout(1000)
+                except:
+                    pass
 
-            content = gi_page.content()
-            gi_page.close()
+                content = gi_page.content()
+                gi_page.close()
 
-            if len(content) < 500:
-                return None, None, 'no_data'
+                if len(content) < 500:
+                    return None, None, 'no_data'
 
-            rating, review_count = extract_rating_review_count(content, scale_10=False)
-            if rating:
-                return rating, review_count or 'N/A', 'ok'
-            return rating or 'N/A', review_count or 'N/A', 'no_data'
+                rating, review_count = extract_rating_review_count(content, scale_10=False)
+                if rating:
+                    return rating, review_count or 'N/A', 'ok'
+                return rating or 'N/A', review_count or 'N/A', 'no_data'
 
-        except Exception:
-            return None, None, 'exception'
+            except Exception:
+                return None, None, 'exception'
 
     def build_url(self, input_data: dict) -> str | None:
         url = input_data.get('url', '')
