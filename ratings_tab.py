@@ -31,7 +31,7 @@ from ratings_platforms import (
     extract_rating_review_count, _get_headless_browser,
     clean_booking_url, search_booking_hotel,
     scrape_hotel, search_and_scrape, mmt_login, mmt_has_session,
-    scrape_mmt_hotel, _start_mmt_chrome,
+    scrape_mmt_hotel, _start_mmt_chrome, scrape_goibibo_hotel,
     get_shared_browser, close_shared_browser, notify_complete,
     save_checkpoint, load_checkpoint, clear_checkpoint,
     COOKIES_DIR, MMT_COOKIES,
@@ -58,6 +58,12 @@ PLATFORM_DESCRIPTIONS = {
         'desc': 'Scrapes MMT hotel ratings. Uses visible browser with saved login session. Accepts FH IDs or MMT URLs.',
         'input_placeholder': 'Paste MMT hotel URL or FH ID (e.g. 32775)...',
         'bulk_placeholder': "Paste MMT links or FH IDs (one per line)...\nRequires an active MMT login session. Click 'Login to MMT' first.",
+    },
+    'goibibo': {
+        'title': 'Goibibo',
+        'desc': 'Scrapes Goibibo hotel ratings. Uses Chrome remote debugging — no login needed. Accepts Goibibo URLs or hotel names.',
+        'input_placeholder': 'Paste Goibibo URL or hotel name...',
+        'bulk_placeholder': "Paste Goibibo links or hotel names (one per line)...\nAlso accepts hotel name, city format.",
     },
     'agoda': {
         'title': 'Agoda',
@@ -117,6 +123,15 @@ class PlatformInfoWidget(QWidget):
             d_layout.addWidget(QLabel("✓ Rating scale: /5"))
             layout.addWidget(details)
 
+        elif platform_key == 'goibibo':
+            details = QGroupBox("How it works")
+            d_layout = QVBoxLayout(details)
+            d_layout.addWidget(QLabel("✓ Runs in Chrome remote debugging mode to avoid protocol blocking"))
+            d_layout.addWidget(QLabel("✓ No login required"))
+            d_layout.addWidget(QLabel("✓ Accepts: goibibo.com/hotels/... URLs or hotel names"))
+            d_layout.addWidget(QLabel("✓ Rating scale: /5"))
+            layout.addWidget(details)
+
         elif platform_key == 'agoda':
             details = QGroupBox("How it works")
             d_layout = QVBoxLayout(details)
@@ -142,6 +157,7 @@ class PlatformInfoWidget(QWidget):
             d_layout = QVBoxLayout(details)
             d_layout.addWidget(QLabel("✓ booking.com/hotel/... → Booking.com"))
             d_layout.addWidget(QLabel("✓ makemytrip.com/hotelid=... → MMT"))
+            d_layout.addWidget(QLabel("✓ goibibo.com/... → Goibibo"))
             d_layout.addWidget(QLabel("✓ agoda.com/... → Agoda"))
             d_layout.addWidget(QLabel("✓ expedia.com/... → Expedia"))
             d_layout.addWidget(QLabel("✓ Numeric FH ID → MMT"))
@@ -199,7 +215,7 @@ class RatingsTab(QWidget):
             QTabBar::tab:hover { background: #1a3a6a; }
         """)
 
-        for key in ['quick', 'booking', 'mmt', 'agoda', 'expedia']:
+        for key in ['quick', 'booking', 'mmt', 'goibibo', 'agoda', 'expedia']:
             self.platform_tabs.addTab(PlatformInfoWidget(key), PLATFORM_DESCRIPTIONS[key]['title'])
 
         layout.addWidget(self.platform_tabs)
@@ -329,7 +345,7 @@ class RatingsTab(QWidget):
 
     def _on_platform_changed(self, index):
         """Update bulk input placeholder and active platform when sub-tab changes."""
-        keys = ['quick', 'booking', 'mmt', 'agoda', 'expedia']
+        keys = ['quick', 'booking', 'mmt', 'goibibo', 'agoda', 'expedia']
         key = keys[index] if index < len(keys) else 'quick'
         self._active_platform = key
         info = PLATFORM_DESCRIPTIONS.get(key, PLATFORM_DESCRIPTIONS['quick'])
@@ -388,6 +404,11 @@ class RatingsTab(QWidget):
                         ))
                     else:
                         self.log_signal.emit("MMT requires login first. Click 'Login to MMT' button.")
+                elif detected['platform'] == 'goibibo' and detected.get('url'):
+                    rating, count = scrape_goibibo_hotel(detected['url'])
+                    self.ui_signal.emit(lambda: self._show_result(
+                        query, rating, count, 'goibibo', detected.get('url')
+                    ))
                 elif detected['platform'] in ('booking', 'agoda', 'expedia') or 'booking.com' in (detected.get('url') or ''):
                     url = detected.get('url', '')
                     name = detected.get('name', query)
@@ -657,8 +678,8 @@ class RatingsTab(QWidget):
                             item['source'] = 'mmt'
                             kept_indices.append(i)
 
-                # 3. Agoda or Expedia Tabs
-                elif self._active_platform in ('agoda', 'expedia'):
+                # 3. Goibibo, Agoda or Expedia Tabs
+                elif self._active_platform in ('goibibo', 'agoda', 'expedia'):
                     if item.get('url') and self._active_platform in item['url']:
                         item['source'] = self._active_platform
                         kept_indices.append(i)
@@ -895,6 +916,8 @@ class ScrapeWorker(QThread):
                         rating, review_count = scrape_mmt_hotel(m.group(1))
                     else:
                         rating, review_count = None, None
+                elif source == 'goibibo' and url:
+                    rating, review_count = scrape_goibibo_hotel(url, name, city)
                 elif source in ('agoda', 'expedia') and url:
                     page = None
                     try:

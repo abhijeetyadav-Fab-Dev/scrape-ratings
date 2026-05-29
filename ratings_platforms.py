@@ -603,6 +603,78 @@ class ExpediaPlatform(RatingPlatform):
         return None
 
 
+# ── Goibibo Platform ──────────────────────────────────────
+
+class GoibiboPlatform(RatingPlatform):
+    name = "Goibibo"
+    short_name = "goibibo"
+    supports_headless = False
+    needs_login = False
+    scale = "/5"
+    accepts = ['url', 'name']
+
+    def scrape(self, page, input_data: dict) -> tuple:
+        url = input_data.get('url', '').strip()
+        if not url:
+            name = input_data.get('name', '')
+            city = input_data.get('city', '')
+            if name:
+                query = f"{name} {city}".strip().replace(' ', '+')
+                url = f"https://www.goibibo.com/hotels/find-hotels-in-india/?searchText={query}"
+            else:
+                return None, None, 'no_url'
+
+        # Goibibo blocks headless, we reuse the MMT Chrome instance over CDP on 9222
+        mmt = MMTPlatform()
+        browser = mmt._get_mmt_browser()
+        if not browser:
+            return None, None, 'browser_error'
+
+        try:
+            context = browser.contexts[0]
+            gi_page = context.new_page()
+            try:
+                gi_page.goto(url, timeout=25000, wait_until="domcontentloaded")
+            except:
+                pass
+            try:
+                gi_page.wait_for_timeout(2000)
+            except:
+                pass
+            try:
+                gi_page.evaluate("window.scrollBy(0, 600)")
+            except:
+                pass
+            try:
+                gi_page.wait_for_timeout(1000)
+            except:
+                pass
+
+            content = gi_page.content()
+            gi_page.close()
+
+            if len(content) < 500:
+                return None, None, 'no_data'
+
+            rating, review_count = extract_rating_review_count(content, scale_10=False)
+            if rating:
+                return rating, review_count or 'N/A', 'ok'
+            return rating or 'N/A', review_count or 'N/A', 'no_data'
+
+        except Exception:
+            return None, None, 'exception'
+
+    def build_url(self, input_data: dict) -> str | None:
+        url = input_data.get('url', '')
+        if url and 'goibibo.com' in url:
+            return url
+        name = input_data.get('name', '')
+        if name:
+            query = name.replace(' ', '+')
+            return f"https://www.goibibo.com/hotels/find-hotels-in-india/?searchText={query}"
+        return None
+
+
 # ── Shared browser pool management ────────────────────────
 
 def _close_headless_browser():
@@ -704,6 +776,7 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($template)
 AVAILABLE_PLATFORMS: dict[str, RatingPlatform] = {
     'booking': BookingPlatform(),
     'mmt': MMTPlatform(),
+    'goibibo': GoibiboPlatform(),
     'agoda': AgodaPlatform(),
     'expedia': ExpediaPlatform(),
 }
@@ -757,6 +830,19 @@ def detect_input_type(text: str) -> dict:
         result['type'] = 'url'
         result['url'] = text
         result['platform'] = 'expedia'
+
+    elif 'goibibo.com' in text:
+        result['type'] = 'url'
+        result['url'] = text
+        result['platform'] = 'goibibo'
+        # Goibibo ID can be in giHotelId or digits at the end of path
+        m = re.search(r'giHotelId=(\w+)', text)
+        if m:
+            result['hotel_id'] = m.group(1)
+        else:
+            m2 = re.search(r'-(\d+)/?$', text)
+            if m2:
+                result['hotel_id'] = m2.group(1)
 
     elif 'http' in text:
         result['type'] = 'url'
@@ -889,3 +975,12 @@ def get_shared_browser():
 def close_shared_browser():
     """Close the shared headless Playwright browser."""
     _close_headless_browser()
+
+
+def scrape_goibibo_hotel(url, name="", city=""):
+    """Scrape Goibibo hotel using Chrome via CDP."""
+    plat = get_platform('goibibo')
+    if not plat:
+        return None, None
+    rating, review_count, _ = plat.scrape(None, {'url': url, 'name': name, 'city': city})
+    return rating, review_count
