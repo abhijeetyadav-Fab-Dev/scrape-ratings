@@ -37,6 +37,8 @@ _cdp_lock = threading.Lock()
 _thread_local = threading.local()
 _all_thread_browsers = []
 _all_thread_pw_managers = []
+_shared_cdp_browser = None
+_shared_cdp_pw = None
 
 
 def _get_headless_browser():
@@ -420,7 +422,8 @@ class MMTPlatform(RatingPlatform):
         return True
 
     def _get_mmt_browser(self):
-        """Connect to the MMT Chrome instance with cookies loaded (Thread-safe)."""
+        """Connect to the MMT Chrome instance with cookies loaded (Thread-safe & serialized)."""
+        global _shared_cdp_browser, _shared_cdp_pw
         from playwright.sync_api import sync_playwright
         import subprocess, socket
         
@@ -448,26 +451,20 @@ class MMTPlatform(RatingPlatform):
                     ])
                     time.sleep(3)
 
-        # 2. Get thread-local playwright manager
-        if not hasattr(_thread_local, 'pw_manager') or _thread_local.pw_manager is None:
-            pw = sync_playwright().start()
-            _thread_local.pw_manager = pw
-            with _browser_lock:
-                _all_thread_pw_managers.append(pw)
-
-        # 3. Connect thread-local manager to CDP
-        if not hasattr(_thread_local, 'mmt_browser') or _thread_local.mmt_browser is None or not _thread_local.mmt_browser.is_connected():
-            try:
-                b = _thread_local.pw_manager.chromium.connect_over_cdp("http://127.0.0.1:9222")
-                _thread_local.mmt_browser = b
-                if MMT_COOKIES.exists():
-                    with open(MMT_COOKIES, 'rb') as f:
-                        cookies = pickle.load(f)
-                    b.contexts[0].add_cookies(cookies)
-            except Exception:
-                return None
-                
-        return _thread_local.mmt_browser
+            # 2. Connect or reuse the single global browser
+            if _shared_cdp_browser is None or not _shared_cdp_browser.is_connected():
+                try:
+                    if _shared_cdp_pw is None:
+                        _shared_cdp_pw = sync_playwright().start()
+                    _shared_cdp_browser = _shared_cdp_pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                    if MMT_COOKIES.exists():
+                        with open(MMT_COOKIES, 'rb') as f:
+                            cookies = pickle.load(f)
+                        _shared_cdp_browser.contexts[0].add_cookies(cookies)
+                except Exception:
+                    return None
+                    
+        return _shared_cdp_browser
 
     def scrape(self, page, input_data: dict) -> tuple:
         hotel_id = input_data.get('hotel_id', '')
@@ -700,7 +697,7 @@ class GoibiboPlatform(RatingPlatform):
 
 def _close_headless_browser():
     """Close all thread-local browsers and managers."""
-    global _all_thread_browsers, _all_thread_pw_managers
+    global _all_thread_browsers, _all_thread_pw_managers, _shared_cdp_browser, _shared_cdp_pw
     with _browser_lock:
         for b in _all_thread_browsers:
             try:
@@ -715,6 +712,20 @@ def _close_headless_browser():
             except:
                 pass
         _all_thread_pw_managers.clear()
+
+        # Close shared CDP browser
+        if _shared_cdp_browser:
+            try:
+                _shared_cdp_browser.close()
+            except:
+                pass
+            _shared_cdp_browser = None
+        if _shared_cdp_pw:
+            try:
+                _shared_cdp_pw.stop()
+            except:
+                pass
+            _shared_cdp_pw = None
 
 
 # ── Checkpoint system for auto-resume ──────────────────────
