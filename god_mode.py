@@ -1716,6 +1716,11 @@ class GodModeTab(QWidget):
         layout.addWidget(scrape_group)
 
         # Log
+        self.scanner_log = QTextEdit()
+        self.scanner_log.setReadOnly(True)
+        self.scanner_log.setMaximumHeight(100)
+        self.scanner_log.setStyleSheet("background: #111; color: #a0e0a0; font-family: Consolas; font-size: 11px;")
+
         log_header = QHBoxLayout()
         log_title = QLabel("Scanner Logs:")
         log_title.setStyleSheet("font-weight: bold; color: #888;")
@@ -1728,10 +1733,6 @@ class GodModeTab(QWidget):
         log_header.addWidget(clear_scan_log_btn)
         layout.addLayout(log_header)
 
-        self.scanner_log = QTextEdit()
-        self.scanner_log.setReadOnly(True)
-        self.scanner_log.setMaximumHeight(100)
-        self.scanner_log.setStyleSheet("background: #111; color: #a0e0a0; font-family: Consolas; font-size: 11px;")
         layout.addWidget(self.scanner_log)
 
         return tab
