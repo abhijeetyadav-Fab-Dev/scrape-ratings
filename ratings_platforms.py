@@ -146,6 +146,24 @@ def extract_rating_review_count(content, scale_10=True):
     """
     rating, review_count = None, None
 
+    # Goibibo specific extraction (highly precise overall ratings/reviews block)
+    if 'goibibo.com' in content or 'AvgReviewTextWrapper' in content:
+        go_rating = re.search(r'AvgReviewTextWrapper[^>]*>([\d.]+)', content)
+        if go_rating:
+            rating = go_rating.group(1).strip()
+        go_reviews = re.search(r'ReviewCountTextWrapper[^>]*>([\d,]+)', content)
+        if go_reviews:
+            # Strip "Ratings" or "Reviews" text
+            review_count = re.sub(r'[^\d]', '', go_reviews.group(1)).strip()
+        if not review_count:
+            # Fallback to reviews count
+            go_reviews_fallback = re.search(r'RatingsCountTextWrapper[^>]*>([\d,]+)', content)
+            if go_reviews_fallback:
+                review_count = re.sub(r'[^\d]', '', go_reviews_fallback.group(1)).strip()
+                
+        if rating:
+            return rating, review_count
+
     # Rating patterns
     rating_patterns = [
         r'\"ratingValue\"[\s:]*\"?(\d+\.?\d*)',

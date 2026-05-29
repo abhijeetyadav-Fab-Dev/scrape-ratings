@@ -48,3 +48,13 @@
 - **Double-Tab PyQt GUI Dashboard**: Redesigned the Universal Scraper Tab into a dual sub-tab interface:
   1. **Scraper Config**: To configure new runs and view logging.
   2. **Scrape History & Resume**: Renders a premium historical table containing past session runs with Month and Status filters, a one-click **"Open CSV"** action to view spreadsheet files instantly in your default system viewer (e.g. Excel), and a **"Resume"** action to instantly recover and resume interrupted scrape runs!
+
+## 2026-05-29
+
+### Goibibo Scraper Integration & Multi-Platform Preservation
+- **Implementation of Goibibo Platform Scraper**: Designed and implemented the `GoibiboPlatform` subclass in `ratings_platforms.py` to route Goibibo hotel scraping via a shared local Chrome instance over CDP on port `9222`, effectively bypassing Akamai/bot shield protection layers.
+- **Accurate Goibibo Selector Hooks**: Added strict selector matchers targeting Goibibo's active overall ratings DOM (`AvgReviewTextWrapper` and `GuestRating-styles__AvgReviewTextWrapper`) and ratings/reviews count containers, completely resolving issues with incorrect fallbacks extracting individual user review ratings (like `1.0` instead of `3.6`).
+- **First-Class Platform Tab & Labels**: Registered Goibibo as a first-class citizen tab in the PyQt6 GUI dashboard (`ratings_tab.py`), added bulk parsing capability, and correctly mapped `Goibibo` to the `Scraped_Source` column in output CSV files instead of defaulting to `Booking.com`.
+- **Systemic Platform Override Bug Fix**: Resolved a critical system-wide bug where loaded CSV rows containing specific platform URLs (e.g. MMT, Goibibo, Agoda, Expedia) were overwritten to `search` (Booking.com name-based search) or skipped whenever a scrape was started from the active Booking.com tab. Added a global preservation hook that respects and retains the correct scraper engine dynamically matching any recognized platform domains, regardless of the active tab.
+- **GUI Launch Reliability**: Resolved widget initialization order issues in the God Mode Page Scanner tab to prevent index out of bounds exceptions on startup.
+- **Background Scraper Deployment**: Safely terminated and redeployed the active background PyQt6 scraper process to load all recent reliability patches and preserve current scrape contexts.

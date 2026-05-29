@@ -639,7 +639,7 @@ class RatingsTab(QWidget):
                         'source': 'mmt',
                         'hotel_id': detected.get('hotel_id', '')
                     })
-                elif detected['platform'] in ('booking', 'agoda', 'expedia'):
+                elif detected['platform'] in ('booking', 'goibibo', 'agoda', 'expedia'):
                     self.items.append({
                         'name': detected.get('name', line[:50]),
                         'city': detected.get('city', ''),
@@ -659,6 +659,16 @@ class RatingsTab(QWidget):
         if self._active_platform != 'quick':
             kept_indices = []
             for i, item in enumerate(self.items):
+                # Respect specific platform URLs already detected/loaded
+                if item.get('url') and any(domain in item['url'].lower() for domain in ('booking.com', 'makemytrip.com', 'goibibo.com', 'agoda.com', 'expedia.com')):
+                    detected = detect_input_type(item['url'])
+                    if detected['platform']:
+                        item['source'] = detected['platform']
+                        if detected.get('hotel_id'):
+                            item['hotel_id'] = detected['hotel_id']
+                    kept_indices.append(i)
+                    continue
+
                 # 1. Booking.com Tab
                 if self._active_platform == 'booking':
                     if item.get('url') and 'booking.com' in item['url']:
@@ -944,6 +954,8 @@ class ScrapeWorker(QThread):
 
             if source == 'mmt':
                 src_label = 'MMT'
+            elif source == 'goibibo':
+                src_label = 'Goibibo'
             elif source == 'agoda':
                 src_label = 'Agoda'
             elif source == 'expedia':

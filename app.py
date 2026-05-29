@@ -32,7 +32,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, csv_path=None, workers=10):
         super().__init__()
-        self.setWindowTitle("Hotel Data Tools — Ratings, God Mode & Universal Scraper")
+        self.setWindowTitle("Hotel Data Tools v2.1 — Ratings, God Mode & Universal Scraper")
 
         icon_path = str(Path(__file__).parent / "icon.ico")
         if os.path.exists(icon_path):
