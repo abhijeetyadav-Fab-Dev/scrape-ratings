@@ -11,7 +11,8 @@ Three tools in one:
 import re, csv, json, time, io
 from pathlib import Path
 from collections import Counter
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs
+from bs4 import BeautifulSoup
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -25,7 +26,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QPixmap, QImage
 
 
-from playwright.sync_api import sync_playwright
+import asyncio
+from playwright.async_api import async_playwright
 
 from ratings_platforms import (
     AVAILABLE_PLATFORMS, detect_input_type, _get_headless_browser,
@@ -279,6 +281,220 @@ class PageScanner:
         return result
 
 
+# ── Google Maps Detail Parser ─────────────────────────────
+
+async def extract_google_maps_details(html_content, text_content, page):
+    soup = BeautifulSoup(html_content, "html.parser")
+    details = {}
+
+    # 1. Title
+    title = ""
+    try:
+        h1_el = await page.query_selector("h1")
+        title = (await h1_el.inner_text()).strip() if h1_el else ""
+    except:
+        pass
+    if not title or title.lower() == "google maps":
+        title_tag = soup.find("h1")
+        title = title_tag.text.strip() if title_tag else ""
+    if not title or title.lower() == "google maps":
+        try:
+            pt = await page.title() or ""
+            if pt.lower() != "google maps":
+                title = pt.split('-')[0].strip()
+        except:
+            pass
+    # Clean Title
+    title = re.sub(r'\s*-\s*Google Maps\s*$', '', title, flags=re.I).strip()
+    if not title or title.lower() == "google maps":
+        # Extract from URL if all else fails
+        try:
+            url = page.url
+            if "/place/" in url:
+                title = url.split("/place/")[1].split("/")[0].replace("+", " ")
+        except:
+            pass
+    details['title'] = title
+
+    # 2. Rating
+    rating = ""
+    f7nice = soup.find(class_="F7nice")
+    if f7nice:
+        rating_match = re.search(r'(\d\.\d)', f7nice.text)
+        rating = rating_match.group(1) if rating_match else f7nice.text.strip()
+    if not rating:
+        font_large = soup.find(class_="fontDisplayLarge")
+        rating = font_large.text.strip() if font_large else ""
+    if not rating:
+        rating_match = re.search(r'\b([3-5]\.\d)\b', text_content[:5000])
+        rating = rating_match.group(1) if rating_match else ""
+    details['rating'] = rating
+
+    # 3. Review Count
+    review_count = ""
+    review_btn = soup.find("button", attrs={"jsaction": re.compile(r'pane\.rating\.moreReviews')})
+    if review_btn:
+        review_text = review_btn.text.strip()
+        review_match = re.search(r'([\d,]+)', review_text)
+        review_count = review_match.group(1).replace(",", "") if review_match else ""
+    if not review_count:
+        review_el = soup.find(attrs={"aria-label": re.compile(r'([\d,]+)\s+reviews', re.I)})
+        if review_el:
+            m = re.search(r'([\d,]+)\s+reviews', review_el.get('aria-label'), re.I)
+            review_count = m.group(1).replace(",", "") if m else ""
+    if not review_count:
+        m = re.search(r'\((\d+)\)\s*(?:·|Hotel|Restaurant|reviews)?', text_content)
+        review_count = m.group(1) if m else ""
+    details['review_count'] = review_count
+
+    # 4. Category
+    category = ""
+    category_btn = soup.find("button", attrs={"jsaction": re.compile(r'pane\.rating\.category')})
+    if category_btn:
+        category = category_btn.text.strip()
+    if not category:
+        lines = [line.strip() for line in text_content.split('\n') if line.strip()]
+        for idx, line in enumerate(lines):
+            if line == details.get('rating') and idx + 1 < len(lines):
+                category = lines[idx+1]
+                break
+    # Clean Category: strip things like "(49)Â·Hotel", "(431)Hotel", or leading ratings
+    category = re.sub(r'^\([\d,]+\)\s*[^a-zA-Z]*', '', category)
+    category = re.sub(r'^[\d.]+\s*[^a-zA-Z]*', '', category)
+    if not category:
+        category = ""
+    details['category'] = category.strip()
+
+    # 5. Address
+    address = ""
+    address_el = soup.find(attrs={"data-item-id": "address"})
+    if address_el:
+        text_el = address_el.find(class_="Io6YTe")
+        address = text_el.text.strip() if text_el else address_el.text.strip()
+    if not address:
+        pin_match = re.search(r'([^\n\r]+,\s*\d{6})', text_content)
+        address = pin_match.group(1).strip() if pin_match else ""
+    details['address'] = address
+
+    # 6. Website (Proper Excel Hyperlink)
+    website_url = ""
+    try:
+        web_btn = await page.query_selector('[data-item-id="authority"]')
+        if web_btn:
+            a_el = await web_btn.query_selector('a')
+            if a_el:
+                website_url = await a_el.get_attribute('href') or ""
+            else:
+                website_url = await web_btn.get_attribute('href') or ""
+    except:
+        pass
+    if not website_url:
+        website_el = soup.find(attrs={"data-item-id": "authority"})
+        if website_el:
+            a_tag = website_el.find("a")
+            website_url = a_tag.get("href") if a_tag else website_el.text.strip()
+        else:
+            # We will ONLY rely on the authority button instead of blindly searching text
+            website_url = ""
+            
+            if website_url and not website_url.startswith("http"):
+                website_url = "http://" + website_url
+
+    # Clean Google redirects
+    if "google.com/url" in website_url:
+        try:
+            parsed = urlparse(website_url)
+            q_params = parse_qs(parsed.query)
+            if 'q' in q_params:
+                website_url = q_params['q'][0]
+        except:
+            pass
+
+    # Clean special character icons
+    website_url = re.sub(r'[^\x20-\x7E]', '', website_url).strip()
+    
+    if website_url:
+        if not website_url.startswith("http"):
+            website_url = "http://" + website_url
+        display_name = urlparse(website_url).netloc.replace("www.", "")
+        details['website'] = f'=HYPERLINK("{website_url}", "{display_name}")'
+    else:
+        details['website'] = ""
+
+    # 7. Phone
+    phone = ""
+    phone_el = soup.find(lambda tag: tag.name == "button" and tag.get("data-item-id", "").startswith("phone:tel:"))
+    if phone_el:
+        text_el = phone_el.find(class_="Io6YTe")
+        phone = text_el.text.strip() if text_el else phone_el.text.strip()
+    if not phone:
+        phone_match = re.search(r'(\+?\d{2,4}[-\s]?\d{3,5}[-\s]?\d{3,5})', text_content)
+        phone = phone_match.group(1) if phone_match else ""
+    if phone and "Check-in" in phone:
+        phone = ""
+    
+    if phone:
+        phone = phone.replace(" ", "").replace("-", "").replace("(", "").replace(")", "").strip()
+        if len(phone) == 10:
+            phone = f"0{phone[:5]} {phone[5:]}"
+        # Use Excel formula format to display string without visible quote
+        details['phone'] = f'="{phone}"'
+    else:
+        details['phone'] = ""
+
+    # 8. Plus Code
+    plus_code = ""
+    plus_el = soup.find(attrs={"data-item-id": "oloc"})
+    if plus_el:
+        text_el = plus_el.find(class_="Io6YTe")
+        plus_code = text_el.text.strip() if text_el else plus_el.text.strip()
+    if not plus_code:
+        plus_match = re.search(r'([A-Z0-9]{4}\+[A-Z0-9]{2,}\s*[a-zA-Z\s,]+)', text_content)
+        plus_code = plus_match.group(1).strip() if plus_match else ""
+    details['plus_code'] = plus_code
+
+    # 9. Check-in / Check-out
+    cin_match = re.search(r'Check-in time:\s*([^\n\r]+)', text_content, re.I)
+    details['check_in_time'] = cin_match.group(1).replace('\u202f', ' ').strip() if cin_match else ""
+    
+    cout_match = re.search(r'Check-out time:\s*([^\n\r]+)', text_content, re.I)
+    details['check_out_time'] = cout_match.group(1).replace('\u202f', ' ').strip() if cout_match else ""
+
+    # 10. Price
+    price = ""
+    price_match = re.search(r'(?:₹|Rs\.?)\s*([\d,]+)', text_content)
+    if price_match:
+        price = price_match.group(1).strip()
+    details['price'] = price
+
+    # 11. Booking Options
+    options = []
+    lines = [line.strip() for line in text_content.split('\n') if line.strip()]
+    platforms = ['agoda', 'makemytrip', 'oyo', 'booking.com', 'expedia', 'official site', 'fabhotels']
+    for idx, line in enumerate(lines):
+        line_lower = line.lower()
+        if any(p in line_lower for p in platforms) and idx + 1 < len(lines):
+            next_line = lines[idx+1]
+            if re.match(r'^(?:₹|Rs\.?)\s*[\d,]+$', next_line):
+                options.append(f"{line}: {next_line.replace('₹', '').replace('Rs.', '').strip()}")
+    details['booking_options'] = ' | '.join(options)
+
+    # 12. Amenities
+    amenities = []
+    if "Hotel details" in text_content:
+        parts = text_content.split("Hotel details")
+        if len(parts) > 1:
+            sublines = [l.strip() for l in parts[1].split('\n') if l.strip()]
+            for sl in sublines:
+                if sl in ["Write a review", "About this data", "Vacation rentals nearby"]:
+                    break
+                if len(sl) > 2 and not sl.startswith('©'):
+                    amenities.append(sl)
+    details['amenities'] = '; '.join(amenities)
+
+    return details
+
+
 # ── Scrape Worker for God Mode ────────────────────────────
 
 class GodModeWorker(QThread):
@@ -288,7 +504,7 @@ class GodModeWorker(QThread):
     def __init__(self, urls, field_config, output_path):
         super().__init__()
         self.urls = urls
-        self.field_config = field_config  # list of {'name': ..., 'selector': ..., 'attribute': ...}
+        self.field_config = field_config or []  # list of {'name': ..., 'selector': ..., 'attribute': ...}
         self.output_path = output_path
         self._stop = False
 
@@ -296,78 +512,160 @@ class GodModeWorker(QThread):
         self._stop = True
 
     def run(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import requests
+        from bs4 import BeautifulSoup
         total = len(self.urls)
-        results = []
+        results = [None] * total
 
-        browser = _get_headless_browser()
-        page = browser.new_page()
-        page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        })
+        # Detect Google Maps URLs
+        is_any_maps = any("google.com/maps" in u.lower() or "goo.gl" in u.lower() or "maps.google" in u.lower() or "g.page" in u.lower() for u in self.urls)
 
-        for i, url in enumerate(self.urls):
+        def scrape_one(idx, url):
             if self._stop:
-                break
+                return idx, {'url': url, 'error': 'Stopped'}
 
-            self.progress.emit(i + 1, total, f"Processing {url[:60]}...")
             row = {'url': url}
+            is_google = "google.com" in url.lower() or "goo.gl" in url.lower() or "g.page" in url.lower()
 
-            try:
-                page.goto(url, timeout=20000, wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)
-
-                for field in self.field_config:
-                    name = field['name']
-                    selector = field['selector']
-                    attr = field.get('attribute', 'text')
-                    multiple = field.get('multiple', False)
-
-                    try:
+            # Fast path for generic pages using requests
+            if not is_google and self.field_config:
+                try:
+                    resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+                    resp.raise_for_status()
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    for field in self.field_config:
+                        name = field['name']
+                        selector = field['selector']
+                        attr = field.get('attribute', 'text')
+                        multiple = field.get('multiple', False)
                         if multiple:
-                            elements = page.query_selector_all(selector)
+                            els = soup.select(selector)
+                            vals = []
+                            for el in els[:50]:
+                                v = el.get_text(strip=True) if attr == 'text' else el.get(attr, '')
+                                if v: vals.append(v)
+                            row[name] = ' | '.join(vals[:10])
+                        else:
+                            el = soup.select_one(selector)
+                            if el:
+                                row[name] = el.get_text(strip=True) if attr == 'text' else el.get(attr, '')
+                            else:
+                                row[name] = ''
+                    return idx, row
+                except Exception:
+                    pass
+
+            # Playwright async path (run in isolated event loop)
+            async def _run_async():
+                from playwright.async_api import async_playwright
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True)
+                    context = await browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0"
+                    )
+                    # Block heavy items
+                    await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "font", "media") else route.continue_())
+                    page = await context.new_page()
+                    await page.set_default_timeout(25000)
+                    await page.goto(url, wait_until="domcontentloaded")
+                    current_url = page.url.lower()
+                    is_maps = "google.com/maps" in current_url or "maps.app.goo.gl" in current_url or "maps.google" in current_url or "/maps/" in current_url
+                    if is_maps:
+                        # Use existing sync extraction for maps (calls function defined elsewhere)
+                        html_content = await page.content()
+                        text_content = await page.evaluate("document.body.innerText") or ""
+                        details = await extract_google_maps_details(html_content, text_content, page)
+                        details['url'] = url
+                        details['platform'] = 'Google Maps'
+                        return idx, details
+                    # Generic page scraping using selectors (still sync BeautifulSoup path earlier)
+                    await page.wait_for_timeout(1500)
+                    row = {}
+                    for field in self.field_config:
+                        name = field['name']
+                        selector = field['selector']
+                        attr = field.get('attribute', 'text')
+                        multiple = field.get('multiple', False)
+                        if multiple:
+                            elements = await page.query_selector_all(selector)
                             values = []
                             for el in elements[:50]:
                                 if attr == 'text':
-                                    v = el.inner_text().strip()
+                                    v = (await el.inner_text()).strip()
                                 elif attr == 'href':
-                                    v = el.get_attribute('href') or ''
+                                    v = await el.get_attribute('href') or ''
                                 else:
-                                    v = el.get_attribute(attr) or ''
+                                    v = await el.get_attribute(attr) or ''
                                 if v:
                                     values.append(v)
                             row[name] = ' | '.join(values[:10])
                         else:
-                            el = page.query_selector(selector)
+                            el = await page.query_selector(selector)
                             if el:
                                 if attr == 'text':
-                                    row[name] = el.inner_text().strip()
+                                    row[name] = (await el.inner_text()).strip()
                                 elif attr == 'href':
-                                    row[name] = el.get_attribute('href') or ''
+                                    row[name] = await el.get_attribute('href') or ''
                                 else:
-                                    row[name] = el.get_attribute(attr) or ''
+                                    row[name] = await el.get_attribute(attr) or ''
                             else:
                                 row[name] = ''
-                    except Exception:
-                        row[name] = ''
-
+                    await page.close()
+                    await context.close()
+                    await browser.close()
+                    return idx, row
+            try:
+                idx, row = asyncio.run(_run_async())
             except Exception as e:
-                for field in self.field_config:
-                    row[field['name']] = f'[ERROR: {str(e)[:50]}]'
+                err_msg = str(e)[:100]
+                if is_any_maps:
+                    return idx, {
+                        'url': url, 'title': f'[ERROR: {err_msg}]', 'rating': '', 'review_count': '', 
+                        'price': '', 'category': '', 'address': '', 'phone': '', 'website': '', 
+                        'plus_code': '', 'check_in_time': '', 'check_out_time': '', 
+                        'booking_options': '', 'amenities': '', 'platform': 'Google Maps'
+                    }
+                else:
+                    err_row = {'url': url}
+                    for field in self.field_config:
+                        err_row[field['name']] = f'[ERROR: {err_msg}]'
+                    return idx, err_row
 
-            results.append(row)
-
-        page.close()
+        # Run scraping concurrently using ThreadPoolExecutor
+        max_workers = min(8, total) if total > 0 else 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {executor.submit(scrape_one, idx, url): idx for idx, url in enumerate(self.urls)}
+            for future in as_completed(future_to_idx):
+                if self._stop:
+                    break
+                idx, row = future.result()
+                results[idx] = row
+                
+                completed = sum(1 for r in results if r is not None)
+                title_val = row.get('title', row.get('url', ''))[:40]
+                self.progress.emit(completed, total, f"Scraped: {title_val}...")
 
         # Write CSV
-        if results:
-            fieldnames = ['url'] + [f['name'] for f in self.field_config]
+        clean_results = [r for r in results if r is not None]
+        if clean_results:
+            if is_any_maps:
+                fieldnames = [
+                    'url', 'title', 'rating', 'review_count', 'price', 'category', 'address', 
+                    'phone', 'website', 'plus_code', 'check_in_time', 'check_out_time', 
+                    'booking_options', 'amenities', 'platform'
+                ]
+            else:
+                fieldnames = ['url'] + [f['name'] for f in self.field_config]
+                
             with open(self.output_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
-                writer.writerows(results)
+                writer.writerows(clean_results)
 
-        success = sum(1 for r in results if any(v for k, v in r.items() if k != 'url'))
+        success = sum(1 for r in clean_results if any(v for k, v in r.items() if k != 'url'))
         self.finished.emit(self.output_path, success, total)
+
 
 
 # ── Bulk Parallel Listing Finder Worker ───────────────────
@@ -1404,6 +1702,11 @@ class GodModeTab(QWidget):
         self.scrape_btn.clicked.connect(self._start_mass_scrape)
         url_input_row2.addWidget(self.scrape_btn)
 
+        self.bulk_csv_btn = QPushButton("Upload CSV")
+        self.bulk_csv_btn.setStyleSheet("background-color: #3498db; font-weight: bold;")
+        self.bulk_csv_btn.clicked.connect(self._browse_bulk_csv)
+        url_input_row2.addWidget(self.bulk_csv_btn)
+
         self.scrape_progress = QProgressBar()
         self.scrape_progress.setVisible(False)
         url_input_row2.addWidget(self.scrape_progress)
@@ -1413,6 +1716,18 @@ class GodModeTab(QWidget):
         layout.addWidget(scrape_group)
 
         # Log
+        log_header = QHBoxLayout()
+        log_title = QLabel("Scanner Logs:")
+        log_title.setStyleSheet("font-weight: bold; color: #888;")
+        log_header.addWidget(log_title)
+        
+        clear_scan_log_btn = QPushButton("Clear Logs")
+        clear_scan_log_btn.clicked.connect(self.scanner_log.clear)
+        clear_scan_log_btn.setMaximumWidth(100)
+        clear_scan_log_btn.setStyleSheet("background-color: #555; font-weight: bold; padding: 4px 8px;")
+        log_header.addWidget(clear_scan_log_btn)
+        layout.addLayout(log_header)
+
         self.scanner_log = QTextEdit()
         self.scanner_log.setReadOnly(True)
         self.scanner_log.setMaximumHeight(100)
@@ -1918,6 +2233,34 @@ class GodModeTab(QWidget):
         self.field_input.clear()
         self.scanner_log.append(f"  + Added custom field: {selector}")
 
+    def _browse_bulk_csv(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select CSV File", "", "CSV Files (*.csv);;All Files (*)")
+        if not file_path:
+            return
+        
+        try:
+            urls = []
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    for val in row:
+                        val = val.strip()
+                        # Simple regex to find any HTTP/HTTPS URLs or maps links
+                        found_urls = re.findall(r'https?://[^\s,\"\']+', val)
+                        for u in found_urls:
+                            if u not in urls:
+                                urls.append(u)
+            
+            if urls:
+                self.scrape_urls_input.setText("\n".join(urls))
+                self.scanner_log.append(f"Loaded {len(urls)} unique URLs from CSV.")
+                # Automatically trigger scraping!
+                self._start_mass_scrape()
+            else:
+                QMessageBox.warning(self, "No URLs Found", "Could not find any HTTP/HTTPS URLs in the selected CSV file.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error Reading CSV", f"Could not read the CSV file: {str(e)}")
+
     def _start_mass_scrape(self):
         urls_text = self.scrape_urls_input.toPlainText().strip()
         if not urls_text:
@@ -1934,8 +2277,10 @@ class GodModeTab(QWidget):
             if config:
                 field_config.append(config)
 
-        if not field_config:
-            self.scanner_log.append("ERROR: No fields selected. Scan a page and check boxes for data to scrape.")
+        is_any_maps = any("google.com/maps" in u.lower() or "goo.gl" in u.lower() or "maps.google" in u.lower() or "g.page" in u.lower() for u in urls)
+
+        if not field_config and not is_any_maps:
+            self.scanner_log.append("ERROR: No fields selected. Scan a page and check boxes for data to scrape (unless scraping Google Maps URLs).")
             return
 
         output_path = str(Path.home() / "Downloads" / f"godmode_scrape_{int(time.time())}.csv")

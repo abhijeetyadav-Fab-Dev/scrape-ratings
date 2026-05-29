@@ -401,55 +401,54 @@ class MMTPlatform(RatingPlatform):
         return True
 
     def _get_mmt_browser(self):
-        """Connect to the MMT Chrome instance with cookies loaded."""
+        """Connect to the MMT Chrome instance with cookies loaded (Thread-safe)."""
         from playwright.sync_api import sync_playwright
-        import subprocess
+        import subprocess, socket
+        
+        # 1. Ensure Chrome is running on 9222 (Only one thread starts it)
+        with _browser_lock:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            res = sock.connect_ex(('127.0.0.1', 9222))
+            sock.close()
+            if res != 0:
+                chrome_paths = [
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+                ]
+                chrome = next((p for p in chrome_paths if os.path.exists(p)), None)
+                if chrome:
+                    user_data = str(COOKIES_DIR / "chrome_scrape")
+                    subprocess.Popen([
+                        chrome,
+                        "--remote-debugging-port=9222",
+                        f"--user-data-dir={user_data}",
+                        "--no-first-run",
+                        "--window-size=1280,800",
+                        "about:blank"
+                    ])
+                    time.sleep(3)
 
-        # Kill old Chrome on debug port
-        try:
-            result = subprocess.run(
-                ["netstat", "-ano", "|", "findstr", ":9222"],
-                capture_output=True, text=True, shell=True, timeout=5
-            )
-            for line in result.stdout.split("\n"):
-                parts = line.strip().split()
-                if len(parts) >= 5 and "LISTENING" in line:
-                    pid = parts[-1]
-                    try:
-                        subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
-                    except:
-                        pass
-        except:
-            pass
-        time.sleep(1)
+        # 2. Get thread-local playwright manager
+        if not hasattr(_thread_local, 'pw_manager') or _thread_local.pw_manager is None:
+            pw = sync_playwright().start()
+            _thread_local.pw_manager = pw
+            with _browser_lock:
+                _all_thread_pw_managers.append(pw)
 
-        chrome_paths = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-        ]
-        chrome = next((p for p in chrome_paths if os.path.exists(p)), None)
-        if not chrome:
-            return None
-
-        user_data = str(COOKIES_DIR / "chrome_scrape")
-        subprocess.Popen([
-            chrome,
-            "--remote-debugging-port=9222",
-            f"--user-data-dir={user_data}",
-            "--no-first-run",
-            "--window-size=1280,800",
-            "about:blank"
-        ])
-        time.sleep(3)
-        pw = sync_playwright().start()
-        browser = pw.chromium.connect_over_cdp("http://localhost:9222")
-        if MMT_COOKIES.exists():
-            context = browser.contexts[0]
-            with open(MMT_COOKIES, 'rb') as f:
-                cookies = pickle.load(f)
-            context.add_cookies(cookies)
-        return browser
+        # 3. Connect thread-local manager to CDP
+        if not hasattr(_thread_local, 'mmt_browser') or _thread_local.mmt_browser is None or not _thread_local.mmt_browser.is_connected():
+            try:
+                b = _thread_local.pw_manager.chromium.connect_over_cdp("http://localhost:9222")
+                _thread_local.mmt_browser = b
+                if MMT_COOKIES.exists():
+                    with open(MMT_COOKIES, 'rb') as f:
+                        cookies = pickle.load(f)
+                    b.contexts[0].add_cookies(cookies)
+            except Exception:
+                return None
+                
+        return _thread_local.mmt_browser
 
     def scrape(self, page, input_data: dict) -> tuple:
         hotel_id = input_data.get('hotel_id', '')
