@@ -544,14 +544,14 @@ class RatingsTab(QWidget):
                 name_idx = find_col('name', 'hotel')
 
             city_idx = find_col('city', 'location')
-            link_idx = find_col('booking', 'mmt', 'agoda', 'expedia', 'link', 'url')
+            link_idx = find_col('booking', 'mmt', 'goibibo', 'gi', 'agoda', 'expedia', 'link', 'url')
             id_idx = find_col('fhid', 'fh id', 'fh', 'front-end id', 'mmt id', 'hotel code', 'hotel id', 'hotel_id', 'code', 'id')
 
             if link_idx is not None and header_idx + 1 < len(rows):
                 test_row = rows[header_idx + 1]
                 if link_idx < len(test_row) and 'http' not in test_row[link_idx]:
                     for i, cell in enumerate(test_row):
-                        if 'makemytrip.com' in cell or 'booking.com' in cell:
+                        if any(domain in cell.lower() for domain in ('makemytrip.com', 'booking.com', 'goibibo.com', 'agoda.com', 'expedia.com')):
                             link_idx = i
                             break
 
@@ -582,6 +582,8 @@ class RatingsTab(QWidget):
                         m = re.search(r'hotelId=(\w+)', url)
                         hid = m.group(1) if m else hotel_id
                         self.items.append({'name': name, 'city': city, 'url': url, 'source': 'mmt', 'hotel_id': hid})
+                    elif url and 'goibibo.com' in url.lower():
+                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'goibibo', 'hotel_id': hotel_id})
                     elif url and 'agoda.com' in url.lower():
                         self.items.append({'name': name, 'city': city, 'url': url, 'source': 'agoda', 'hotel_id': hotel_id})
                     elif url and 'expedia.com' in url.lower():
@@ -597,7 +599,7 @@ class RatingsTab(QWidget):
                     if detected['platform'] == 'mmt':
                         hid = detected.get('hotel_id') or hotel_id
                         self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': 'mmt', 'hotel_id': hid})
-                    elif detected['platform'] in ('booking', 'agoda', 'expedia'):
+                    elif detected['platform'] in ('booking', 'agoda', 'expedia', 'goibibo'):
                         self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': detected['platform'], 'hotel_id': hotel_id})
                     else:
                         self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': 'search', 'hotel_id': hotel_id})
