@@ -380,7 +380,7 @@ class DeepResearchWorker(threading.Thread):
                                 
                                 if not hid:
                                     # Look for JSON field mtxHotelId or simple hotelId parameter in HTML source
-                                    m = re.search(r'"mtxHotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'hotelId\s*=\s*"?(\d+)"?', html) or re.search(r'hotelId(?:["\':\s]*)([a-zA-Z0-9_]+)', html)
+                                    m = re.search(r'"hotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'"mtxHotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'hotelId\s*=\s*"?(\d+)"?', html) or re.search(r'hotelId(?:["\':\s]*)([a-zA-Z0-9_]+)', html)
                                     if m:
                                         hid = m.group(1)
                                         self.signals.log.emit(f"  ✓ Found ID from page source regex: {hid}")
