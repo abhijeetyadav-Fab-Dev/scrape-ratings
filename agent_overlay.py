@@ -95,6 +95,9 @@ class DeepResearchWorker(threading.Thread):
             page.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "stylesheet", "font", "media") else route.continue_())
             
             for i, target in enumerate(valid_queries, 1):
+                if i > 1:
+                    self.signals.log.emit("  ⏳ Waiting to prevent rate limits...")
+                    time.sleep(3.5)
                 search_query = f"{target}"
                 if self.platform_filter:
                     if self.platform_filter == 'mmt':
@@ -284,6 +287,14 @@ class DeepResearchWorker(threading.Thread):
                                 if page:
                                     try:
                                         page.wait_for_load_state("load", timeout=3000)
+                                    except Exception:
+                                        pass
+                                    
+                                    try:
+                                        p_title = page.title()
+                                        self.signals.log.emit(f"  📄 Loaded Title: '{p_title}'")
+                                        if "access denied" in p_title.lower() or "security check" in p_title.lower() or "bot" in p_title.lower():
+                                            self.signals.log.emit("  ⚠️ Headless session blocked by Akamai bot detection.")
                                     except Exception:
                                         pass
                                     
