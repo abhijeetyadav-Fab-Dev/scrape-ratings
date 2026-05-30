@@ -289,12 +289,26 @@ class DeepResearchWorker(threading.Thread):
                                             // Check __INITIAL_STATE__
                                             if (window.__INITIAL_STATE__) {
                                                 const state = window.__INITIAL_STATE__;
+                                                // Direct key checks
+                                                if (state.requestInfo && state.requestInfo.query && state.requestInfo.query.hotelId) {
+                                                    return String(state.requestInfo.query.hotelId);
+                                                }
+                                                if (state.requestInfo && state.requestInfo.pwaQuery && state.requestInfo.pwaQuery.hotelId) {
+                                                    return String(state.requestInfo.pwaQuery.hotelId);
+                                                }
+                                                if (state.requestInfo && state.requestInfo.globalSettings && state.requestInfo.globalSettings.seoQuery && state.requestInfo.globalSettings.seoQuery.hotelId) {
+                                                    return String(state.requestInfo.globalSettings.seoQuery.hotelId);
+                                                }
+                                                if (state.hotelDetail && state.hotelDetail.staticDetail && state.hotelDetail.staticDetail.hotelId) {
+                                                    return String(state.hotelDetail.staticDetail.hotelId);
+                                                }
                                                 if (state.hotelDetail && state.hotelDetail.hotelId) {
                                                     return String(state.hotelDetail.hotelId);
                                                 }
                                                 if (state.hotelDetail && state.hotelDetail.hotelid) {
                                                     return String(state.hotelDetail.hotelid);
                                                 }
+                                                
                                                 const findId = (obj) => {
                                                     if (!obj || typeof obj !== 'object') return null;
                                                     if (obj.hotelId) return String(obj.hotelId);
