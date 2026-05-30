@@ -95,15 +95,15 @@ class DeepResearchWorker(threading.Thread):
                 search_query = f"{target}"
                 if self.platform_filter:
                     if self.platform_filter == 'mmt':
-                        search_query += " site:makemytrip.com inurl:hotelId"
+                        search_query += " site:makemytrip.com/hotels/"
                     elif self.platform_filter == 'booking':
-                        search_query += " site:booking.com"
+                        search_query += " site:booking.com/hotel/"
                     elif self.platform_filter == 'agoda':
-                        search_query += " site:agoda.com"
+                        search_query += " site:agoda.com/"
                     elif self.platform_filter == 'goibibo':
-                        search_query += " site:goibibo.com"
+                        search_query += " site:goibibo.com/hotels/"
                     elif self.platform_filter == 'expedia':
-                        search_query += " site:expedia.com"
+                        search_query += " site:expedia.com/"
                         
                 self.signals.log.emit(f"[{i}/{len(valid_queries)}] 🔍 Searching Index for: '{target[:30]}'...")
                 
