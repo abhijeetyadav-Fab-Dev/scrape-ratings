@@ -25,6 +25,7 @@ from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from ratings_tab import RatingsTab
 from god_mode import GodModeTab
 from universal_scraper import UniversalScraperTab
+from ocm_tab import BulkOCMGeneratorTab
 
 
 class MainWindow(QMainWindow):
@@ -75,6 +76,9 @@ class MainWindow(QMainWindow):
         # Tab 3 — Universal Scraper (extranet data extraction)
         self.tabs.addTab(UniversalScraperTab(), "Universal Scraper")
 
+        # Tab 4 — Bulk OCM Generator
+        self.tabs.addTab(BulkOCMGeneratorTab(), "Bulk OCM Generator")
+
         # ── Floating AI Agent Overlay Corner Integration ───────────
         from agent_overlay import FloatingAgentWidget
         self.agent = FloatingAgentWidget(self, default_context="Ratings Scraper")
@@ -94,7 +98,7 @@ class MainWindow(QMainWindow):
             self.agent.move(w - self.agent.width() - margin, h - self.agent.height() - margin)
 
     def _on_tab_changed(self, index):
-        tab_names = ["Ratings Scraper", "God Mode", "Universal Scraper"]
+        tab_names = ["Ratings Scraper", "God Mode", "Universal Scraper", "Bulk OCM Generator"]
         name = tab_names[index] if index < len(tab_names) else "Agent Workspace"
         if hasattr(self, 'agent') and self.agent:
             self.agent.default_context = name
@@ -108,10 +112,17 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event: QDropEvent):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         if files and files[0].endswith('.csv'):
-            # Forward CSV to the Ratings Scraper tab (tab index 0)
-            ratings_tab = self.tabs.widget(0)
-            if hasattr(ratings_tab, 'load_csv'):
-                ratings_tab.load_csv(files[0])
+            current_idx = self.tabs.currentIndex()
+            # If user is on the Bulk OCM Generator tab, forward the CSV there
+            if current_idx == 3:
+                ocm_tab = self.tabs.widget(3)
+                if hasattr(ocm_tab, 'load_csv'):
+                    ocm_tab.load_csv(files[0])
+            else:
+                # Default: Forward CSV to the Ratings Scraper tab (tab index 0)
+                ratings_tab = self.tabs.widget(0)
+                if hasattr(ratings_tab, 'load_csv'):
+                    ratings_tab.load_csv(files[0])
 
 
 def main():
