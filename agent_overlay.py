@@ -284,55 +284,70 @@ class DeepResearchWorker(threading.Thread):
                                         pass
                                     
                                     # 1. Try to evaluate JavaScript to extract ID dynamically
-                                    try:
-                                        evaluated_id = page.evaluate("""() => {
-                                            try {
-                                                // Check __INITIAL_STATE__
-                                                if (window.__INITIAL_STATE__) {
-                                                    const state = window.__INITIAL_STATE__;
-                                                    if (state.hotelDetail && state.hotelDetail.hotelId) {
-                                                        return String(state.hotelDetail.hotelId);
-                                                    }
-                                                    if (state.hotelDetail && state.hotelDetail.hotelid) {
-                                                        return String(state.hotelDetail.hotelid);
-                                                    }
-                                                    const findId = (obj) => {
-                                                        if (!obj || typeof obj !== 'object') return null;
-                                                        if (obj.hotelId) return String(obj.hotelId);
-                                                        if (obj.hotelid) return String(obj.hotelid);
-                                                        for (let k in obj) {
-                                                            if (obj.hasOwnProperty(k)) {
-                                                                let res = findId(obj[k]);
-                                                                if (res) return res;
-                                                            }
+                                    js_eval_code = """() => {
+                                        try {
+                                            // Check __INITIAL_STATE__
+                                            if (window.__INITIAL_STATE__) {
+                                                const state = window.__INITIAL_STATE__;
+                                                if (state.hotelDetail && state.hotelDetail.hotelId) {
+                                                    return String(state.hotelDetail.hotelId);
+                                                }
+                                                if (state.hotelDetail && state.hotelDetail.hotelid) {
+                                                    return String(state.hotelDetail.hotelid);
+                                                }
+                                                const findId = (obj) => {
+                                                    if (!obj || typeof obj !== 'object') return null;
+                                                    if (obj.hotelId) return String(obj.hotelId);
+                                                    if (obj.hotelid) return String(obj.hotelid);
+                                                    for (let k in obj) {
+                                                        if (obj.hasOwnProperty(k)) {
+                                                            let res = findId(obj[k]);
+                                                            if (res) return res;
                                                         }
-                                                        return null;
-                                                    };
-                                                    let res = findId(state);
-                                                    if (res) return res;
-                                                }
-                                                // Check script tags text patterns
-                                                const scripts = document.querySelectorAll('script');
-                                                for (let script of scripts) {
-                                                    let text = script.textContent || '';
-                                                    let m = text.match(/"hotelId"\\s*:\\s*"?(\\d+)"?/i) || text.match(/hotelId\\s*=\\s*"?(\\d+)"?/i) || text.match(/"mtxHotelId"\\s*:\\s*"?(\\d+)"?/i);
-                                                    if (m) return m[1];
-                                                }
-                                                // Meta/link tag canonical url
-                                                let meta = document.querySelector('meta[property="og:url"]') || document.querySelector('link[rel="canonical"]');
-                                                if (meta) {
-                                                    let url = meta.content || meta.href || '';
-                                                    let m = url.match(/hotelId=(\\d+)/i) || url.match(/topHtlId=(\\d+)/i);
-                                                    if (m) return m[1];
-                                                }
-                                            } catch(e) {}
-                                            return "";
-                                        }""")
+                                                    }
+                                                    return null;
+                                                };
+                                                let res = findId(state);
+                                                if (res) return res;
+                                            }
+                                            // Check script tags text patterns
+                                            const scripts = document.querySelectorAll('script');
+                                            for (let script of scripts) {
+                                                let text = script.textContent || '';
+                                                let m = text.match(/"hotelId"\\s*:\\s*"?(\\d+)"?/i) || text.match(/hotelId\\s*=\\s*"?(\\d+)"?/i) || text.match(/"mtxHotelId"\\s*:\\s*"?(\\d+)"?/i);
+                                                if (m) return m[1];
+                                            }
+                                            // Meta/link tag canonical url
+                                            let meta = document.querySelector('meta[property="og:url"]') || document.querySelector('link[rel="canonical"]');
+                                            if (meta) {
+                                                let url = meta.content || meta.href || '';
+                                                let m = url.match(/hotelId=(\\d+)/i) || url.match(/topHtlId=(\\d+)/i);
+                                                if (m) return m[1];
+                                            }
+                                        } catch(e) {}
+                                        return "";
+                                    }"""
+
+                                    try:
+                                        # Wait a bit for potential redirects/navigation to settle
+                                        page.wait_for_timeout(2000)
+                                        evaluated_id = page.evaluate(js_eval_code)
                                         if evaluated_id:
                                             hid = evaluated_id
                                             self.signals.log.emit(f"  ✓ Found ID via page evaluation: {hid}")
                                     except Exception as e:
-                                        self.signals.log.emit(f"⚠️ Page evaluation failed: {e}")
+                                        # If execution context was destroyed, wait and retry
+                                        if "destroyed" in str(e).lower() or "navigation" in str(e).lower():
+                                            try:
+                                                page.wait_for_timeout(2500)
+                                                evaluated_id = page.evaluate(js_eval_code)
+                                                if evaluated_id:
+                                                    hid = evaluated_id
+                                                    self.signals.log.emit(f"  ✓ Found ID via page evaluation retry: {hid}")
+                                            except Exception as retry_e:
+                                                self.signals.log.emit(f"⚠️ Page evaluation retry failed: {retry_e}")
+                                        else:
+                                            self.signals.log.emit(f"⚠️ Page evaluation failed: {e}")
 
                                     if not hid:
                                         try:
