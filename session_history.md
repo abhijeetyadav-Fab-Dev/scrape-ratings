@@ -76,3 +76,11 @@
 - **MMT Evaluator Context Retry Logic**: Implemented retry logic for evaluation context destruction errors by waiting for the dynamic router redirects to settle before executing JavaScript evaluations.
 - **Stealth Headless Chrome Mode**: Reconfigured the thread-local headless browser parameters to run under Chrome's new headless architecture (`--headless=new` and `--disable-blink-features=AutomationControlled`), completely bypassing Akamai's bot-detection protocol blockers on MakeMyTrip's SEO friendly details pages.
 - **CSV Output Cleanups**: Clear the bulk input text box in `ratings_tab.py` prior to resolving links to prevent original input query names from ending up at the top of the exported CSV file.
+
+### 2026-05-31
+
+### Deep Research Akamai Bypass & Validation Improvements
+- **Akamai Bot-Bypass via Browser Contexts**: Reconfigured the page crawler initialization in `DeepResearchWorker` and `RatingPlatform` to launch explicit, fully configured browser contexts (`browser.new_context()`) with mocked `user_agent`, `viewport`, `locale`, and `timezone_id` parameters. This ensures the browser's JavaScript evaluation engine (`navigator.userAgent`) correctly spoofs a real desktop browser, completely bypassing Akamai bot-detection layers.
+- **Context Lifecycle Management**: Overrode `page.close` dynamically in `RatingPlatform.new_page()` to automatically clean up and close its parent browser context, avoiding context/memory leakage without requiring changes to the rest of the codebase where `page.close()` is invoked.
+- **Timeout Buffering**: Increased the `page.goto` redirection resolution timeout in [agent_overlay.py](file:///C:/Users/CS05180/Desktop/scrape-ratings/agent_overlay.py) from 10 seconds to 25 seconds to give slow MMT details pages adequate time to load and populate `window.__INITIAL_STATE__` before extracting hotel IDs.
+- **MMT Details Page Redirect Filtering**: Added validation to verify that resolved MakeMyTrip URLs contain `-details-` or `hotel-details`. This prevents dead listings that automatically redirect to the generic MMT `/hotels/` home page from registering as resolved, keeping the CSV inputs clean.
