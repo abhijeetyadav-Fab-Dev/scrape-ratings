@@ -83,21 +83,28 @@ class DeepResearchWorker(threading.Thread):
         self.signals.log.emit(f"🤖 Agent Initiated: Batch Deep Research on {len(valid_queries)} target(s)...")
         
         browser = None
-        page = None
         try:
             browser = _get_headless_browser()
-            page = browser.new_page()
-            page.set_extra_http_headers({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            })
-            page.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "stylesheet", "font", "media") else route.continue_())
             
             for i, target in enumerate(valid_queries, 1):
                 if i > 1:
                     self.signals.log.emit("  ⏳ Waiting to prevent rate limits...")
                     time.sleep(3.5)
+                
+                # Launch clean page tab context for each query to bypass anti-bot track checks
+                context = browser.new_context(
+                    viewport={'width': 1280, 'height': 900},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    locale="en-US",
+                    timezone_id="Asia/Kolkata"
+                )
+                page = context.new_page()
+                page.set_extra_http_headers({
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                })
+                page.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "stylesheet", "font", "media") else route.continue_())
+                
                 search_query = f"{target}"
                 if self.platform_filter:
                     if self.platform_filter == 'mmt':
@@ -232,13 +239,13 @@ class DeepResearchWorker(threading.Thread):
                     self.signals.log.emit(f"  🔗 Resolving redirect for: {decoded_href[:60]}...")
                     resolved_url = decoded_href
                     try:
-                        page.goto(decoded_href, timeout=10000, wait_until="domcontentloaded")
+                        page.goto(decoded_href, timeout=25000, wait_until="domcontentloaded")
                         resolved_url = page.url
                     except Exception as e:
                         self.signals.log.emit(f"  ⚠️ Redirect resolution page.goto failed: {e}")
                         if orig_href != decoded_href:
                             try:
-                                page.goto(orig_href, timeout=10000, wait_until="domcontentloaded")
+                                page.goto(orig_href, timeout=25000, wait_until="domcontentloaded")
                                 resolved_url = page.url
                             except Exception as e2:
                                 self.signals.log.emit(f"  ⚠️ Redirect resolution orig_href page.goto failed: {e2}")
@@ -249,6 +256,11 @@ class DeepResearchWorker(threading.Thread):
                         if any(pat in resolved_url.lower() for pat in patterns):
                             final_plat = plat_key
                             break
+                    
+                    # Ensure it is a details page for MMT to prevent general homepage/landing page redirects from registering as resolved
+                    if final_plat == 'mmt':
+                        if not ('-details-' in resolved_url.lower() or 'hotel-details' in resolved_url.lower()):
+                            final_plat = None
                     
                     # Enforce platform filter on final resolved URL
                     if self.platform_filter and self.platform_filter != 'any':
@@ -436,6 +448,13 @@ class DeepResearchWorker(threading.Thread):
                     })
                 else:
                     self.signals.log.emit(f"  ❌ Failed to resolve footprint for '{target}'.")
+                
+                try:
+                    ctx = page.context
+                    page.close()
+                    ctx.close()
+                except:
+                    pass
             
             self.signals.log.emit(f"\n✅ Batch Deep Research Completed on {len(valid_queries)} targets.")
             self.signals.finished.emit({'batch_finished': True})
@@ -444,7 +463,10 @@ class DeepResearchWorker(threading.Thread):
             self.signals.log.emit(f"❌ Research failed: {e}")
         finally:
             if page:
-                try: page.close()
+                try:
+                    ctx = page.context
+                    page.close()
+                    ctx.close()
                 except: pass
 
 class AgentReasoningSignals(QObject):

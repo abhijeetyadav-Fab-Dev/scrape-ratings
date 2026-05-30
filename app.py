@@ -75,6 +75,32 @@ class MainWindow(QMainWindow):
         # Tab 3 — Universal Scraper (extranet data extraction)
         self.tabs.addTab(UniversalScraperTab(), "Universal Scraper")
 
+        # ── Floating AI Agent Overlay Corner Integration ───────────
+        from agent_overlay import FloatingAgentWidget
+        self.agent = FloatingAgentWidget(self, default_context="Ratings Scraper")
+        # Position floating in the bottom-right corner over the content pane
+        self.agent.setGeometry(600, 320, 320, 420)
+        
+        # Connect tab switches to update Agent's context dynamically
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Keep floating agent anchored to bottom-right corner during window resizes
+        if hasattr(self, 'agent') and self.agent:
+            margin = 30
+            w = self.width()
+            h = self.height()
+            self.agent.move(w - self.agent.width() - margin, h - self.agent.height() - margin)
+
+    def _on_tab_changed(self, index):
+        tab_names = ["Ratings Scraper", "God Mode", "Universal Scraper"]
+        name = tab_names[index] if index < len(tab_names) else "Agent Workspace"
+        if hasattr(self, 'agent') and self.agent:
+            self.agent.default_context = name
+            self.agent.title_lbl.setText(f"Antigravity Agent ({name})")
+            self.agent.chat_display.append(f"\n🤖 [Context Switch]: Switched context to {name}. Deep research button is fully mapped to feed resolved links into this workspace!")
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()

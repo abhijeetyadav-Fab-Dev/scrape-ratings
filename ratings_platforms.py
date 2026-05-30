@@ -136,12 +136,31 @@ class RatingPlatform(ABC):
     def new_page(self):
         """Create a new page from the headless browser pool."""
         browser = _get_headless_browser()
-        page = browser.new_page()
+        context = browser.new_context(
+            viewport={'width': 1280, 'height': 900},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            locale="en-US",
+            timezone_id="Asia/Kolkata"
+        )
+        page = context.new_page()
         page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         })
+        
+        # Override page.close to also close its context
+        original_close = page.close
+        def close_with_context():
+            try:
+                original_close()
+            except:
+                pass
+            try:
+                context.close()
+            except:
+                pass
+        page.close = close_with_context
+
         # Block images, stylesheets, fonts, and media to speed up loads by up to 500%
         page.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "stylesheet", "font", "media") else route.continue_())
         return page
