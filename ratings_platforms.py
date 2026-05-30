@@ -53,7 +53,13 @@ def _get_headless_browser():
             _all_thread_pw_managers.append(pw)
             
     if not hasattr(_thread_local, 'browser') or _thread_local.browser is None or not _thread_local.browser.is_connected():
-        b = _thread_local.pw_manager.chromium.launch(headless=True)
+        b = _thread_local.pw_manager.chromium.launch(
+            headless=False,
+            args=[
+                "--headless=new",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        )
         _thread_local.browser = b
         with _browser_lock:
             _all_thread_browsers.append(b)
@@ -242,18 +248,45 @@ class BookingPlatform(RatingPlatform):
     def _search_hotel(self, page, hotel_name, city=""):
         """Search Booking.com for a hotel by name + city. Returns first matching URL or None."""
         query = f"{hotel_name} {city}".strip()
-        query = re.sub(r'[^\w\s]', ' ', query).strip()
-        search_url = f"https://www.booking.com/searchresults.en-gb.html?ss={query.replace(' ', '+')}"
+        query_clean = re.sub(r'[^\w\s]', ' ', query).strip()
+        search_url = f"https://www.booking.com/searchresults.en-gb.html?ss={query_clean.replace(' ', '+')}"
         page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
         try:
             page.wait_for_selector('a[href*="/hotel/"]', timeout=8000)
         except:
             pass
-        links = page.query_selector_all('a[href*="/hotel/"]')
-        for link in links[:5]:
-            href = link.get_attribute('href')
-            if href and '/hotel/' in href:
-                return href
+        
+        # 1. High-precision card title extraction. 
+        # Booking.com lists hotels in cards. Each card has a title element with data-testid="title"
+        cards = page.query_selector_all('[data-testid="property-card"]')
+        norm_target = re.sub(r'[^\w]', '', hotel_name.lower())
+        
+        # We strip common brand prefixes like 'fabhotel' or 'hotel' from target to match flexibly
+        target_stripped = norm_target.replace('fabhotel', '').replace('hotel', '').strip()
+        
+        for card in cards:
+            try:
+                title_el = card.query_selector('[data-testid="title"]')
+                link_el = card.query_selector('a[href*="/hotel/"]')
+                if title_el and link_el:
+                    title_text = title_el.inner_text() or ''
+                    href = link_el.get_attribute('href')
+                    if not href:
+                        continue
+                        
+                    norm_title = re.sub(r'[^\w]', '', title_text.lower())
+                    title_stripped = norm_title.replace('fabhotel', '').replace('hotel', '').strip()
+                    
+                    # Strict check: 
+                    # The unique word identifier (stripped target name) must be present in the matched card's title text
+                    if target_stripped and target_stripped in title_stripped:
+                        return href
+                    elif title_stripped and title_stripped in target_stripped:
+                        return href
+            except:
+                continue
+
+        # If strict validation check fails, return None instead of falling back to unrelated properties!
         return None
 
     def _scrape_current_page(self, page):
@@ -470,14 +503,94 @@ class MMTPlatform(RatingPlatform):
         hotel_id = input_data.get('hotel_id', '')
         url = input_data.get('url', '')
 
-        # Extract hotel ID from URL if not provided
-        if not hotel_id and url:
-            m = re.search(r'hotelId=(\w+)', url)
-            if m:
-                hotel_id = m.group(1)
+        # Resolve name query by searching on MakeMyTrip if hotel_id is plain text name instead of numeric ID
+        if hotel_id and not hotel_id.isdigit():
+            # If the user pasted a full MMT URL into the search box or name query field
+            if 'makemytrip.com' in hotel_id:
+                m_url = re.search(r'hotelId=(\d+)', hotel_id)
+                if m_url:
+                    hotel_id = m_url.group(1)
+            
+            if hotel_id and not hotel_id.isdigit():
+                # Treat hotel_id as hotel name query
+                name_query = hotel_id
+                browser = self._get_mmt_browser()
+                if not browser:
+                    return None, None, 'browser_error'
+                with _cdp_lock:
+                    try:
+                        context = browser.contexts[0]
+                        search_page = context.new_page()
+                        # Block resource hogs
+                        search_page.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "font", "media") else r.continue_())
+                        search_url = f"https://www.makemytrip.com/hotels/?search={name_query.replace(' ', '+')}"
+                        search_page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
+                        search_page.wait_for_timeout(3500)
+                        
+                        # 1. First, check if the search landing page redirected directly to a hotel details page!
+                        current_url = search_page.url
+                        m_direct = re.search(r'hotelId=(\d+)', current_url)
+                        if m_direct:
+                            found_id = m_direct.group(1)
+                        
+                        if not found_id:
+                            # Parse property cards to match titles strictly
+                            norm_target = re.sub(r'[^\w]', '', name_query.lower())
+                            target_stripped = norm_target.replace('fabhotel', '').replace('hotel', '').strip()
+                            
+                            # Evaluate title element text and href on search results page
+                            cards = search_page.query_selector_all('div[id^="listingcard_"]') or search_page.query_selector_all('.infinite-scroll-component > div')
+                            
+                            for card in cards:
+                                try:
+                                    title_el = card.query_selector('p[id^="hlistpg_proplist_name"]') or card.query_selector('span[id^="hlistpg_proplist_name"]') or card.query_selector('h3') or card.query_selector('.font22') or card.query_selector('p')
+                                    link_el = card.query_selector('a[href*="hotelId="]')
+                                    if title_el and link_el:
+                                        title_text = title_el.inner_text() or ''
+                                        href = link_el.get_attribute('href')
+                                        if href:
+                                            m_id = re.search(r'hotelId=(\d+)', href)
+                                            if m_id:
+                                                norm_title = re.sub(r'[^\w]', '', title_text.lower())
+                                                title_stripped = norm_title.replace('fabhotel', '').replace('hotel', '').strip()
+                                                
+                                                # Match overlaps
+                                                if (target_stripped and target_stripped in title_stripped) or (title_stripped and title_stripped in target_stripped):
+                                                    found_id = m_id.group(1)
+                                                    break
+                                                
+                                                if len(target_stripped) >= 6 and target_stripped[:6] in title_stripped:
+                                                    found_id = m_id.group(1)
+                                                    break
+                                except:
+                                    continue
+                                    
+                        if not found_id:
+                            # 2. Fallback: Search all href links on the page containing "hotelId="
+                            try:
+                                links = search_page.eval_on_selector_all('a[href*="hotelId="]', "elements => elements.map(el => el.href)")
+                                for link in links:
+                                    m_l = re.search(r'hotelId=(\d+)', link)
+                                    if m_l:
+                                        found_id = m_l.group(1)
+                                        break
+                            except:
+                                pass
+                                
+                        if found_id:
+                            hotel_id = found_id
+                        else:
+                            hotel_id = None
+                                
+                        search_page.close()
+                    except Exception as e:
+                        try: search_page.close()
+                        except: pass
+                        print(f"MMT Search Exception: {e}")
 
-        if not hotel_id:
-            return None, None, 'no_id'
+        if not hotel_id or not hotel_id.isdigit():
+            if not url or 'makemytrip.com' not in url:
+                return None, None, 'not_found'
 
         # MMT requires visible browser with cookies — we use CDP connection
         browser = self._get_mmt_browser()
@@ -488,9 +601,15 @@ class MMTPlatform(RatingPlatform):
             try:
                 context = browser.contexts[0]
                 mmt_page = context.new_page()
-                url = f"https://www.makemytrip.com/hotels/hotel-details/?hotelId={hotel_id}&_uCurrency=INR&checkin=07202026&checkout=07212026&city=CTDEL&country=IN&roomStayQualifier=2e0e&locusId=CTDEL&locusType=city"
+                
+                # Use direct URL if hotel_id is missing, otherwise construct the optimal checkin URL
+                if hotel_id and hotel_id.isdigit():
+                    target_url = f"https://www.makemytrip.com/hotels/hotel-details/?hotelId={hotel_id}&_uCurrency=INR&checkin=07202026&checkout=07212026&city=CTDEL&country=IN&roomStayQualifier=2e0e&locusId=CTDEL&locusType=city"
+                else:
+                    target_url = url
+                    
                 try:
-                    mmt_page.goto(url, timeout=20000, wait_until="domcontentloaded")
+                    mmt_page.goto(target_url, timeout=20000, wait_until="domcontentloaded")
                 except:
                     pass
                 try:
@@ -656,9 +775,28 @@ class GoibiboPlatform(RatingPlatform):
                 except:
                     pass
                 try:
-                    gi_page.wait_for_timeout(2000)
+                    gi_page.wait_for_timeout(3500)
                 except:
                     pass
+                
+                # Check if we landed on a search results page instead of a hotel details page
+                current_url = gi_page.url
+                if 'find-hotels-in-india' in current_url or 'searchText=' in current_url or len(gi_page.eval_on_selector_all('a[href*="/hotels/"]', "elements => elements.map(el => el.href)")) > 0:
+                    try:
+                        # Find the first hotel link in the results list
+                        links = gi_page.eval_on_selector_all('a', "elements => elements.map(el => el.href)")
+                        details_url = None
+                        for link in links:
+                            # Hotel details links typically look like /hotels/name-hotel-in-city-id/
+                            if '/hotels/' in link and '-' in link and any(char.isdigit() for char in link):
+                                details_url = link
+                                break
+                        if details_url:
+                            gi_page.goto(details_url, timeout=25000, wait_until="domcontentloaded")
+                            gi_page.wait_for_timeout(2500)
+                    except Exception:
+                        pass
+
                 try:
                     gi_page.evaluate("window.scrollBy(0, 600)")
                 except:
@@ -675,11 +813,15 @@ class GoibiboPlatform(RatingPlatform):
                     return None, None, 'no_data'
 
                 rating, review_count = extract_rating_review_count(content, scale_10=False)
+                
+                # If rating not found in search results / detail redirect, try one fallback check in DOM structures
                 if rating:
                     return rating, review_count or 'N/A', 'ok'
                 return rating or 'N/A', review_count or 'N/A', 'no_data'
 
             except Exception:
+                try: gi_page.close()
+                except: pass
                 return None, None, 'exception'
 
     def build_url(self, input_data: dict) -> str | None:
