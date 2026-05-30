@@ -88,8 +88,11 @@ class DeepResearchWorker(threading.Thread):
             browser = _get_headless_browser()
             page = browser.new_page()
             page.set_extra_http_headers({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             })
+            page.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "stylesheet", "font", "media") else route.continue_())
             
             for i, target in enumerate(valid_queries, 1):
                 search_query = f"{target}"
@@ -228,13 +231,14 @@ class DeepResearchWorker(threading.Thread):
                     try:
                         page.goto(decoded_href, timeout=10000, wait_until="domcontentloaded")
                         resolved_url = page.url
-                    except Exception:
+                    except Exception as e:
+                        self.signals.log.emit(f"  ⚠️ Redirect resolution page.goto failed: {e}")
                         if orig_href != decoded_href:
                             try:
                                 page.goto(orig_href, timeout=10000, wait_until="domcontentloaded")
                                 resolved_url = page.url
-                            except Exception:
-                                pass
+                            except Exception as e2:
+                                self.signals.log.emit(f"  ⚠️ Redirect resolution orig_href page.goto failed: {e2}")
                     
                     # Verify resolved URL matches domain patterns
                     final_plat = None
