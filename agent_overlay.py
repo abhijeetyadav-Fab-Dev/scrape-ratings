@@ -282,20 +282,75 @@ class DeepResearchWorker(threading.Thread):
                                         page.wait_for_load_state("load", timeout=3000)
                                     except Exception:
                                         pass
+                                    
+                                    # 1. Try to evaluate JavaScript to extract ID dynamically
                                     try:
-                                        html = page.content()
-                                    except Exception:
-                                        page.wait_for_timeout(2000)
-                                        html = page.content()
+                                        evaluated_id = page.evaluate("""() => {
+                                            try {
+                                                // Check __INITIAL_STATE__
+                                                if (window.__INITIAL_STATE__) {
+                                                    const state = window.__INITIAL_STATE__;
+                                                    if (state.hotelDetail && state.hotelDetail.hotelId) {
+                                                        return String(state.hotelDetail.hotelId);
+                                                    }
+                                                    if (state.hotelDetail && state.hotelDetail.hotelid) {
+                                                        return String(state.hotelDetail.hotelid);
+                                                    }
+                                                    const findId = (obj) => {
+                                                        if (!obj || typeof obj !== 'object') return null;
+                                                        if (obj.hotelId) return String(obj.hotelId);
+                                                        if (obj.hotelid) return String(obj.hotelid);
+                                                        for (let k in obj) {
+                                                            if (obj.hasOwnProperty(k)) {
+                                                                let res = findId(obj[k]);
+                                                                if (res) return res;
+                                                            }
+                                                        }
+                                                        return null;
+                                                    };
+                                                    let res = findId(state);
+                                                    if (res) return res;
+                                                }
+                                                // Check script tags text patterns
+                                                const scripts = document.querySelectorAll('script');
+                                                for (let script of scripts) {
+                                                    let text = script.textContent || '';
+                                                    let m = text.match(/"hotelId"\\s*:\\s*"?(\\d+)"?/i) || text.match(/hotelId\\s*=\\s*"?(\\d+)"?/i) || text.match(/"mtxHotelId"\\s*:\\s*"?(\\d+)"?/i);
+                                                    if (m) return m[1];
+                                                }
+                                                // Meta/link tag canonical url
+                                                let meta = document.querySelector('meta[property="og:url"]') || document.querySelector('link[rel="canonical"]');
+                                                if (meta) {
+                                                    let url = meta.content || meta.href || '';
+                                                    let m = url.match(/hotelId=(\\d+)/i) || url.match(/topHtlId=(\\d+)/i);
+                                                    if (m) return m[1];
+                                                }
+                                            } catch(e) {}
+                                            return "";
+                                        }""")
+                                        if evaluated_id:
+                                            hid = evaluated_id
+                                            self.signals.log.emit(f"  ✓ Found ID via page evaluation: {hid}")
+                                    except Exception as e:
+                                        self.signals.log.emit(f"⚠️ Page evaluation failed: {e}")
+
+                                    if not hid:
+                                        try:
+                                            html = page.content()
+                                        except Exception:
+                                            page.wait_for_timeout(2000)
+                                            html = page.content()
                                 else:
                                     import urllib.request
                                     req = urllib.request.Request(target_link, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
                                     html = urllib.request.urlopen(req, timeout=5).read().decode('utf-8')
-                                # Look for JSON field mtxHotelId or simple hotelId parameter
-                                m = re.search(r'"mtxHotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'hotelId\s*=\s*"?(\d+)"?', html)
-                                if m:
-                                    hid = m.group(1)
-                                    self.signals.log.emit(f"  ✓ Found ID from page source: {hid}")
+                                
+                                if not hid:
+                                    # Look for JSON field mtxHotelId or simple hotelId parameter in HTML source
+                                    m = re.search(r'"mtxHotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'hotelId\s*=\s*"?(\d+)"?', html) or re.search(r'hotelId(?:["\':\s]*)([a-zA-Z0-9_]+)', html)
+                                    if m:
+                                        hid = m.group(1)
+                                        self.signals.log.emit(f"  ✓ Found ID from page source regex: {hid}")
                             except Exception as e:
                                 self.signals.log.emit(f"⚠️ Deep ID extraction failed: {e}")
 

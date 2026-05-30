@@ -21,7 +21,7 @@ from playwright.sync_api import sync_playwright
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QProgressBar, QTextEdit, QSpinBox, QLineEdit,
-    QFrame, QTabWidget, QComboBox, QGroupBox, QGridLayout,
+    QFrame, QTabWidget, QComboBox, QGroupBox, QGridLayout, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -36,7 +36,7 @@ from ratings_platforms import (
     save_checkpoint, load_checkpoint, clear_checkpoint,
     COOKIES_DIR, MMT_COOKIES,
 )
-
+from agent_overlay import DeepResearchWorker
 
 # ── Platform Descriptions ─────────────────────────────────
 
@@ -271,6 +271,16 @@ class RatingsTab(QWidget):
         self.sample_btn.clicked.connect(self.download_sample_csv)
         self.sample_btn.setStyleSheet("background-color: #3498db; font-weight: bold;")
         btn_row.addWidget(self.sample_btn)
+        
+        self.find_links_btn = QPushButton("Find Frontend Links")
+        self.find_links_btn.clicked.connect(self.find_frontend_links)
+        self.find_links_btn.setStyleSheet("background-color: #8e44ad; font-weight: bold;")
+        self.find_links_btn.setToolTip("Resolve bulk hotel names into URLs")
+        btn_row.addWidget(self.find_links_btn)
+
+        self.deep_extract_cb = QCheckBox("Deep Extract MMT ID (Slower)")
+        self.deep_extract_cb.setStyleSheet("color: #ccc; font-size: 11px;")
+        btn_row.addWidget(self.deep_extract_cb)
 
         btn_row.addWidget(QLabel("Workers:"))
         self.worker_spin = QSpinBox()
@@ -396,11 +406,16 @@ class RatingsTab(QWidget):
 
         def do_search():
             try:
-                if detected['platform'] == 'mmt' and detected.get('hotel_id'):
+                if (detected['platform'] == 'mmt' or 'makemytrip.com' in query) and (detected.get('hotel_id') or 'hotelId=' in query):
+                    hid = detected.get('hotel_id')
+                    if not hid:
+                        m_hid = re.search(r'hotelId=(\d+)', query)
+                        if m_hid:
+                            hid = m_hid.group(1)
                     if mmt_has_session():
-                        rating, count = scrape_mmt_hotel(detected['hotel_id'])
+                        rating, count = scrape_mmt_hotel(hid)
                         self.ui_signal.emit(lambda: self._show_result(
-                            query, rating, count, 'mmt', detected.get('url')
+                            query, rating, count, 'mmt', detected.get('url') or query
                         ))
                     else:
                         self.log_signal.emit("MMT requires login first. Click 'Login to MMT' button.")
@@ -442,13 +457,63 @@ class RatingsTab(QWidget):
                         self.ui_signal.emit(lambda: self._show_result(
                             name, rating, count, 'booking', found_url
                         ))
-                elif detected['type'] == 'name':
+                elif detected['type'] == 'name' or (detected['platform'] in ('booking', 'mmt', 'goibibo', 'agoda', 'expedia') and not detected.get('hotel_id') and not detected.get('url')):
                     name = detected.get('name', query)
                     city = detected.get('city', '')
-                    rating, count, found_url, _ = search_and_scrape(name, city)
-                    self.ui_signal.emit(lambda: self._show_result(
-                        name, rating, count, 'booking', found_url
-                    ))
+                    target_platform = detected.get('platform') or self._active_platform
+                    
+                    if target_platform == 'mmt':
+                        if mmt_has_session():
+                            # Resolve hotel name query using MMT platform scraper which supports query searching
+                            rating, count = scrape_mmt_hotel(name) # Will trigger MMT search internally
+                            self.ui_signal.emit(lambda: self._show_result(
+                                name, rating, count, 'mmt', f"MMT Search: {name}"
+                            ))
+                        else:
+                            self.log_signal.emit("MMT requires login first. Click 'Login to MMT' button.")
+                    elif target_platform == 'goibibo':
+                        rating, count = scrape_goibibo_hotel('', name, city)
+                        self.ui_signal.emit(lambda: self._show_result(
+                            name, rating, count, 'goibibo', f"Goibibo Search: {name}"
+                        ))
+                    elif target_platform == 'agoda':
+                        # Headless Agoda search
+                        page = None
+                        try:
+                            browser = _get_headless_browser()
+                            page = browser.new_page()
+                            url = f"https://www.agoda.com/search?text={name.replace(' ', '+')}"
+                            page.goto(url, timeout=25000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(3000)
+                            content = page.content()
+                            rating, count = extract_rating_review_count(content, scale_10=True)
+                            self.ui_signal.emit(lambda: self._show_result(name, rating, count, 'agoda', url))
+                        except Exception as e:
+                            self.log_signal.emit(f"Agoda search failed: {e}")
+                        finally:
+                            if page: page.close()
+                    elif target_platform == 'expedia':
+                        # Headless Expedia search
+                        page = None
+                        try:
+                            browser = _get_headless_browser()
+                            page = browser.new_page()
+                            url = f"https://www.expedia.com/hotels/search?text={name.replace(' ', '+')}"
+                            page.goto(url, timeout=25000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(3000)
+                            content = page.content()
+                            rating, count = extract_rating_review_count(content, scale_10=True)
+                            self.ui_signal.emit(lambda: self._show_result(name, rating, count, 'expedia', url))
+                        except Exception as e:
+                            self.log_signal.emit(f"Expedia search failed: {e}")
+                        finally:
+                            if page: page.close()
+                    else:
+                        # Default Booking.com search
+                        rating, count, found_url, _ = search_and_scrape(name, city)
+                        self.ui_signal.emit(lambda: self._show_result(
+                            name, rating, count, 'booking', found_url
+                        ))
                 else:
                     self.log_signal.emit(f"Could not determine how to scrape: {query}")
             except Exception as e:
@@ -474,6 +539,80 @@ class RatingsTab(QWidget):
         else:
             self.log.append(f"  Could not find ratings for: {query}")
         self.log.append("")
+
+    # ── Frontend Link Finder ──────────────────────────────────
+    
+    def find_frontend_links(self):
+        text = self.bulk_input.toPlainText().strip()
+        if not text:
+            self.log.append("❌ Please paste hotel names in the text area first!")
+            return
+            
+        self.find_links_btn.setEnabled(False)
+        self.browse_btn.setEnabled(False)
+        self.start_btn.setEnabled(False)
+        self.bulk_input.clear()
+        
+        plat = self._active_platform
+        if plat == 'quick':
+            plat = 'any'
+            
+        deep_extract = self.deep_extract_cb.isChecked()
+            
+        self.research_worker = DeepResearchWorker(text, plat, deep_extract=deep_extract)
+        self.research_worker.signals.log.connect(self.log.append)
+        self.research_worker.signals.finished.connect(self._on_frontend_link_found)
+        self.research_worker.start()
+
+    def _on_frontend_link_found(self, result):
+        if 'error' in result:
+            if result.get('error') == 'No valid queries':
+                self.find_links_btn.setEnabled(True)
+                self.browse_btn.setEnabled(True)
+                self.start_btn.setEnabled(True)
+                self.research_worker = None
+            return
+            
+        if result.get('batch_finished'):
+            self.find_links_btn.setEnabled(True)
+            self.browse_btn.setEnabled(True)
+            self.start_btn.setEnabled(True)
+            self.research_worker = None
+            
+            # Prompt user to download CSV
+            current_text = self.bulk_input.toPlainText().strip()
+            if current_text:
+                from PyQt6.QtWidgets import QMessageBox
+                reply = QMessageBox.question(
+                    self, "Download Links",
+                    "Frontend links have been extracted!\n\nWould you like to download them as a CSV file?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    path, _ = QFileDialog.getSaveFileName(self, "Save Frontend Links", "frontend_links.csv", "CSV Files (*.csv)")
+                    if path:
+                        try:
+                            with open(path, 'w', newline='', encoding='utf-8') as f:
+                                import csv
+                                writer = csv.writer(f)
+                                writer.writerow(["URL", "Hotel_ID"])
+                                for line in current_text.split('\n'):
+                                    parts = line.split('|')
+                                    url = parts[0].strip()
+                                    hid = parts[1].strip() if len(parts) > 1 else ''
+                                    writer.writerow([url, hid])
+                            QMessageBox.information(self, "Success", f"Links successfully saved to:\n{path}")
+                        except Exception as e:
+                            QMessageBox.warning(self, "Error", f"Failed to save CSV:\n{e}")
+            return
+            
+        # Append the resolved link to the bulk_input window
+        current = self.bulk_input.toPlainText().strip()
+        new_link = result['url']
+        if current:
+            self.bulk_input.setPlainText(f"{current}\n{new_link}")
+        else:
+            self.bulk_input.setPlainText(new_link)
 
     # ── CSV Loading ─────────────────────────────────────────
 
@@ -628,27 +767,32 @@ class RatingsTab(QWidget):
             lines = [l.strip() for l in bulk_text.split('\n') if l.strip()]
             self.items = []
             for line in lines:
-                detected = self._detect_and_parse(line)
+                parts = [p.strip() for p in line.split('|')]
+                url_part = parts[0]
+                hid_part = parts[1] if len(parts) > 1 else ''
+                
+                detected = detect_input_type(url_part)
                 if not detected:
                     continue
                 if detected['platform'] == 'mmt':
                     self.items.append({
-                        'name': detected.get('name', line[:50]),
+                        'name': detected.get('name', url_part[:50]),
                         'city': detected.get('city', ''),
-                        'url': detected.get('url', ''),
+                        'url': url_part if 'http' in url_part else '',
                         'source': 'mmt',
-                        'hotel_id': detected.get('hotel_id', '')
+                        'hotel_id': detected.get('hotel_id') or hid_part
                     })
                 elif detected['platform'] in ('booking', 'goibibo', 'agoda', 'expedia'):
                     self.items.append({
-                        'name': detected.get('name', line[:50]),
+                        'name': detected.get('name', url_part[:50]),
                         'city': detected.get('city', ''),
-                        'url': detected.get('url', line),
-                        'source': detected['platform']
+                        'url': url_part if 'http' in url_part else '',
+                        'source': detected['platform'],
+                        'hotel_id': hid_part
                     })
                 else:
                     self.items.append({
-                        'name': line, 'city': '', 'url': '', 'source': 'search'
+                        'name': url_part, 'city': '', 'url': '', 'source': 'search', 'hotel_id': hid_part
                     })
 
         if not self.items:
@@ -659,7 +803,12 @@ class RatingsTab(QWidget):
         if self._active_platform != 'quick':
             kept_indices = []
             for i, item in enumerate(self.items):
-                # Respect specific platform URLs already detected/loaded
+                # Respect specific platform URLs/sources already detected or loaded
+                if item.get('source') in ('mmt', 'goibibo', 'booking', 'agoda', 'expedia'):
+                    # The source has already been correctly resolved via CSV headers or URLs
+                    kept_indices.append(i)
+                    continue
+
                 if item.get('url') and any(domain in item['url'].lower() for domain in ('booking.com', 'makemytrip.com', 'goibibo.com', 'agoda.com', 'expedia.com')):
                     detected = detect_input_type(item['url'])
                     if detected['platform']:
@@ -1065,24 +1214,26 @@ class ScrapeWorker(QThread):
                 status += f" • {eta_str}"
             self.progress.emit(processed_count[0], total, status)
 
-        # Split into parallel (non-MMT) and sequential (MMT) items
-        non_mmt_indices = [
+        # Split into parallel (non-CDP) and sequential (CDP) items
+        # Goibibo and MMT both use connect_over_cdp which requires running on the exact same thread to avoid
+        # cross-thread Playwright asyncio event loop conflicts, or at least sequential execution on a single worker thread.
+        cdp_indices = [
             i for i in range(total)
             if i in remaining
-            and self.items[i].get('source') != 'mmt'
+            and self.items[i].get('source') in ('mmt', 'goibibo')
         ]
-        mmt_indices = [
+        non_cdp_indices = [
             i for i in range(total)
             if i in remaining
-            and self.items[i].get('source') == 'mmt'
+            and self.items[i].get('source') not in ('mmt', 'goibibo')
         ]
 
-        # Process non-MMT items in parallel
-        if non_mmt_indices:
+        # Process non-CDP items (Booking, Agoda, Expedia) in parallel using headless browser threads
+        if non_cdp_indices:
             pending = set()
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
                 futures = {executor.submit(scrape_one, i, self.items[i]): i
-                           for i in non_mmt_indices}
+                           for i in non_cdp_indices}
                 pending = set(futures.keys())
                 pause_start = None
                 for future in as_completed(futures):
@@ -1111,29 +1262,37 @@ class ScrapeWorker(QThread):
                     if processed_count[0] % SAVE_INTERVAL == 0:
                         save_and_checkpoint()
 
-        # Process MMT items sequentially (shared browser)
-        if mmt_indices and not self._stop:
+        # Process CDP items sequentially in a dedicated single thread pool executor to maintain strict thread affinity for CDP connections
+        if cdp_indices and not self._stop:
             pause_start = None
-            for i in mmt_indices:
-                if self._stop:
-                    break
-                while self._pause:
-                    if pause_start is None:
-                        pause_start = time.time()
-                    time.sleep(0.5)
+            with ThreadPoolExecutor(max_workers=1) as cdp_executor:
+                # We submit each CDP scrape sequentially to guarantee they all execute on the exact same worker thread
+                for i in cdp_indices:
                     if self._stop:
                         break
-                if pause_start is not None:
-                    start_time += time.time() - pause_start
-                    pause_start = None
-                i, result = scrape_one(i, self.items[i])
-                results[i] = result
-                processed_count[0] += 1
-                emit_status(i, result or {
-                    'rating': 'CANCELLED', 'review_count': '', 'source': ''
-                })
-                if processed_count[0] % SAVE_INTERVAL == 0:
-                    save_and_checkpoint()
+                    while self._pause:
+                        if pause_start is None:
+                            pause_start = time.time()
+                        time.sleep(0.5)
+                        if self._stop:
+                            break
+                    if pause_start is not None:
+                        start_time += time.time() - pause_start
+                        pause_start = None
+                    
+                    future = cdp_executor.submit(scrape_one, i, self.items[i])
+                    try:
+                        i, result = future.result()
+                    except Exception as e:
+                        result = {'rating': 'N/A', 'review_count': 'N/A', 'source': self.items[i].get('source', ''), 'fail_reason': f'exception: {e}'}
+                    
+                    results[i] = result
+                    processed_count[0] += 1
+                    emit_status(i, result or {
+                        'rating': 'CANCELLED', 'review_count': '', 'source': ''
+                    })
+                    if processed_count[0] % SAVE_INTERVAL == 0:
+                        save_and_checkpoint()
 
         save_incremental()
         if self.input_file:
