@@ -261,20 +261,32 @@ class DeepResearchWorker(threading.Thread):
                     # ── Extract Hotel ID for MakeMyTrip (MMT) ──
                     if plat == 'mmt' and not hid and self.deep_extract:
                         self.signals.log.emit("  🕵️ Deep extracting MMT Hotel ID...")
-                        # First, try to get hotel_id from URL query parameters
+                        # First, try to get hotel_id from URL query parameters (case-insensitive)
                         try:
                             url_parts = urlparse(target_link)
                             query = parse_qs(url_parts.query)
-                            if 'hotelid' in query:
-                                hid = query['hotelid'][0]
+                            query_lower = {k.lower(): v for k, v in query.items()}
+                            if 'hotelid' in query_lower:
+                                hid = query_lower['hotelid'][0]
                                 self.signals.log.emit(f"  ✓ Found ID in URL query: {hid}")
+                            elif 'tophtlid' in query_lower:
+                                hid = query_lower['tophtlid'][0]
+                                self.signals.log.emit(f"  ✓ Found ID in URL query (topHtlId): {hid}")
                         except Exception as e:
                             self.signals.log.emit(f"⚠️ URL query parsing failed: {e}")
                         # If still not found, fetch page content and search for common patterns
                         if not hid:
                             try:
                                 if page:
-                                    html = page.content()
+                                    try:
+                                        page.wait_for_load_state("load", timeout=3000)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        html = page.content()
+                                    except Exception:
+                                        page.wait_for_timeout(2000)
+                                        html = page.content()
                                 else:
                                     import urllib.request
                                     req = urllib.request.Request(target_link, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
