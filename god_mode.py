@@ -2102,6 +2102,24 @@ def build_all_platform_links(input_data: dict) -> dict[str, str]:
     return links
 
 
+# ── Page Scan Worker for Thread-Safety ────────────────────
+
+class PageScanWorker(QThread):
+    finished = pyqtSignal(dict)
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            scanner = PageScanner()
+            result = scanner.scan(self.url)
+            self.finished.emit(result)
+        except Exception as e:
+            self.finished.emit({'url': self.url, 'error': str(e)})
+
+
 # ── God Mode Tab Widget ───────────────────────────────────
 
 class GodModeTab(QWidget):
@@ -2641,114 +2659,112 @@ class GodModeTab(QWidget):
         self.scanner_log.append(f"Scanning: {url}...")
         self._clear_scan_results()
 
-        def do_scan():
-            scanner = PageScanner()
-            result = scanner.scan(url)
+        self.scan_worker = PageScanWorker(url)
+        self.scan_worker.finished.connect(self._on_scan_finished)
+        self.scan_worker.start()
 
-            self.scanner_log.append(f"  Title: {result.get('title', 'N/A')[:100]}")
-            self.scanner_log.append(f"  Tables: {len(result['tables'])}  Lists: {len(result['lists'])}  Cards: {len(result['cards'])}")
-            if result.get('jsonld'):
-                self.scanner_log.append(f"  JSON-LD items: {len(result['jsonld'])}")
-            if result.get('error'):
-                self.scanner_log.append(f"  WARNING: {result['error']}")
+    def _on_scan_finished(self, result):
+        self.scanner_log.append(f"  Title: {result.get('title', 'N/A')[:100]}")
+        self.scanner_log.append(f"  Tables: {len(result.get('tables', []))}  Lists: {len(result.get('lists', []))}  Cards: {len(result.get('cards', []))}")
+        if result.get('jsonld'):
+            self.scanner_log.append(f"  JSON-LD items: {len(result['jsonld'])}")
+        if result.get('error'):
+            self.scanner_log.append(f"  WARNING: {result['error']}")
 
-            # Rebuild UI with scan results
-            self.scan_btn.setEnabled(True)
+        # Rebuild UI with scan results
+        self.scan_btn.setEnabled(True)
 
-            # Clear placeholder and add results
-            self._clear_scan_results()
+        # Clear placeholder and add results
+        self._clear_scan_results()
 
-            # Add scan results widgets
-            if result.get('tables'):
-                tables_group = QGroupBox(f"Detected Tables ({len(result['tables'])})")
-                tbl_layout = QVBoxLayout(tables_group)
-                for t in result['tables'][:5]:
-                    hdr_text = ', '.join(t['headers'][:5]) if t['headers'] else '(no headers)'
-                    cb = QCheckBox(f"Table #{t['id']}: [{t['row_count']} rows] Headers: {hdr_text}")
-                    cb.setProperty('type', 'table')
-                    cb.setProperty('id', t['id'])
-                    cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
-                    tbl_layout.addWidget(cb)
-                self.scan_layout.addWidget(tables_group)
+        # Add scan results widgets
+        if result.get('tables'):
+            tables_group = QGroupBox(f"Detected Tables ({len(result['tables'])})")
+            tbl_layout = QVBoxLayout(tables_group)
+            for t in result['tables'][:5]:
+                hdr_text = ', '.join(t['headers'][:5]) if t['headers'] else '(no headers)'
+                cb = QCheckBox(f"Table #{t['id']}: [{t['row_count']} rows] Headers: {hdr_text}")
+                cb.setProperty('type', 'table')
+                cb.setProperty('id', t['id'])
+                cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
+                tbl_layout.addWidget(cb)
+            self.scan_layout.addWidget(tables_group)
 
-            if result.get('lists'):
-                lists_group = QGroupBox(f"Detected Lists ({len(result['lists'])})")
-                lst_layout = QVBoxLayout(lists_group)
-                for lst in result['lists'][:5]:
-                    sample_text = lst['sample'][0][:60] if lst['sample'] else '(empty)'
-                    cb = QCheckBox(f"List #{lst['id']}: [{lst.get('tag', '')}] {lst['item_count']} items — e.g. \"{sample_text}\"")
-                    cb.setProperty('type', 'list')
-                    cb.setProperty('id', lst['id'])
-                    cb.setProperty('selector', f"{lst.get('tag', 'ul').lower()} > li")
-                    cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
-                    lst_layout.addWidget(cb)
-                self.scan_layout.addWidget(lists_group)
+        if result.get('lists'):
+            lists_group = QGroupBox(f"Detected Lists ({len(result['lists'])})")
+            lst_layout = QVBoxLayout(lists_group)
+            for lst in result['lists'][:5]:
+                sample_text = lst['sample'][0][:60] if lst['sample'] else '(empty)'
+                cb = QCheckBox(f"List #{lst['id']}: [{lst.get('tag', '')}] {lst['item_count']} items — e.g. \"{sample_text}\"")
+                cb.setProperty('type', 'list')
+                cb.setProperty('id', lst['id'])
+                cb.setProperty('selector', f"{lst.get('tag', 'ul').lower()} > li")
+                cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
+                lst_layout.addWidget(cb)
+            self.scan_layout.addWidget(lists_group)
 
-            if result.get('cards'):
-                cards_group = QGroupBox(f"Detected Cards ({len(result['cards'])})")
-                card_layout = QVBoxLayout(cards_group)
-                for card in result['cards'][:5]:
-                    cls = card.get('class', '')
-                    sample_text = ''
-                    if card['sample']:
-                        s = card['sample'][0]
-                        sample_text = list(s.values())[0][:60] if isinstance(s, dict) else str(s)[:60]
-                    label = f"Card: <{card['tag']}> [{card['count']} items]"
-                    if cls:
-                        label += f" class=\"{cls}\""
-                    label += f" — e.g. \"{sample_text}\""
-                    cb = QCheckBox(label)
-                    cb.setProperty('type', 'card')
-                    cb.setProperty('selector', f"div.{cls}" if cls else card['tag'])
-                    cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
-                    card_layout.addWidget(cb)
-                self.scan_layout.addWidget(cards_group)
+        if result.get('cards'):
+            cards_group = QGroupBox(f"Detected Cards ({len(result['cards'])})")
+            card_layout = QVBoxLayout(cards_group)
+            for card in result['cards'][:5]:
+                cls = card.get('class', '')
+                sample_text = ''
+                if card['sample']:
+                    s = card['sample'][0]
+                    sample_text = list(s.values())[0][:60] if isinstance(s, dict) else str(s)[:60]
+                label = f"Card: <{card['tag']}> [{card['count']} items]"
+                if cls:
+                    label += f" class=\"{cls}\""
+                label += f" — e.g. \"{sample_text}\""
+                cb = QCheckBox(label)
+                cb.setProperty('type', 'card')
+                cb.setProperty('selector', f"div.{cls}" if cls else card['tag'])
+                cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
+                card_layout.addWidget(cb)
+            self.scan_layout.addWidget(cards_group)
 
-            if result.get('jsonld'):
-                jsonld_group = QGroupBox("Detected JSON-LD / Structured Data")
-                jsonld_layout = QVBoxLayout(jsonld_group)
-                for j in result['jsonld'][:3]:
-                    type_name = j.get('type', 'Unknown')
-                    cb = QCheckBox(f"JSON-LD: {type_name}")
-                    cb.setProperty('type', 'jsonld')
-                    cb.setProperty('data', j['data'])
-                    cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
-                    jsonld_layout.addWidget(cb)
-                self.scan_layout.addWidget(jsonld_group)
+        if result.get('jsonld'):
+            jsonld_group = QGroupBox("Detected JSON-LD / Structured Data")
+            jsonld_layout = QVBoxLayout(jsonld_group)
+            for j in result['jsonld'][:3]:
+                type_name = j.get('type', 'Unknown')
+                cb = QCheckBox(f"JSON-LD: {type_name}")
+                cb.setProperty('type', 'jsonld')
+                cb.setProperty('data', j['data'])
+                cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
+                jsonld_layout.addWidget(cb)
+            self.scan_layout.addWidget(jsonld_group)
 
-            if result.get('ratings'):
-                ratings_group = QGroupBox("Detected Ratings / Reviews")
-                r_layout = QVBoxLayout(ratings_group)
-                for r in result['ratings']:
-                    rating = r.get('rating', '?')
-                    count = r.get('count', '?')
-                    cb = QCheckBox(f"Rating: {rating}/10  |  Reviews: {count}")
-                    cb.setProperty('type', 'rating')
-                    cb.setChecked(True)  # Default: include ratings
-                    cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
-                    r_layout.addWidget(cb)
-                self.scan_layout.addWidget(ratings_group)
+        if result.get('ratings'):
+            ratings_group = QGroupBox("Detected Ratings / Reviews")
+            r_layout = QVBoxLayout(ratings_group)
+            for r in result['ratings']:
+                rating = r.get('rating', '?')
+                count = r.get('count', '?')
+                cb = QCheckBox(f"Rating: {rating}/10  |  Reviews: {count}")
+                cb.setProperty('type', 'rating')
+                cb.setChecked(True)  # Default: include ratings
+                cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
+                r_layout.addWidget(cb)
+            self.scan_layout.addWidget(ratings_group)
 
-            if result.get('links'):
-                links_group = QGroupBox("Detected Links (first 10 shown)")
-                link_layout = QVBoxLayout(links_group)
-                for l in result['links'][:10]:
-                    text = l.get('text', '')[:40]
-                    href = l.get('href', '')[:60]
-                    cb = QCheckBox(f"Link: \"{text}\" -> {href}")
-                    cb.setProperty('type', 'link')
-                    cb.setProperty('href', l.get('href', ''))
-                    cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
-                    link_layout.addWidget(cb)
-                self.scan_layout.addWidget(links_group)
+        if result.get('links'):
+            links_group = QGroupBox("Detected Links (first 10 shown)")
+            link_layout = QVBoxLayout(links_group)
+            for l in result['links'][:10]:
+                text = l.get('text', '')[:40]
+                href = l.get('href', '')[:60]
+                cb = QCheckBox(f"Link: \"{text}\" -> {href}")
+                cb.setProperty('type', 'link')
+                cb.setProperty('href', l.get('href', ''))
+                cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
+                link_layout.addWidget(cb)
+            self.scan_layout.addWidget(links_group)
 
-            if not result.get('tables') and not result.get('lists') and not result.get('cards') and not result.get('jsonld') and not result.get('ratings'):
-                no_data = QLabel("No structured data detected on this page. Try a different URL or add custom fields manually.")
-                no_data.setStyleSheet("color: #888; font-style: italic; padding: 10px;")
-                self.scan_layout.addWidget(no_data)
-
-        import threading
-        threading.Thread(target=do_scan, daemon=True).start()
+        if not result.get('tables') and not result.get('lists') and not result.get('cards') and not result.get('jsonld') and not result.get('ratings'):
+            no_data = QLabel("No structured data detected on this page. Try a different URL or add custom fields manually.")
+            no_data.setStyleSheet("color: #888; font-style: italic; padding: 10px;")
+            self.scan_layout.addWidget(no_data)
 
     def _clear_scan_results(self):
         """Remove all scan result widgets (keep placeholder)."""

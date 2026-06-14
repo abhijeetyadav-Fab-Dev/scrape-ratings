@@ -112,6 +112,10 @@
 - **Direct ID Routing**: Added dedicated CSV columns (`mmt_id` and `bcom_id`) inside the `ratings_tab.py` importer. When these IDs are detected, the `DeepResearchWorker` completely skips Yahoo/Bing search index engines and executes lightning-fast direct link construction.
 - **Strict Verification Upgrades**: Upgraded `agent_overlay.py` prompt logic to enforce rigorous Latitude/Longitude coordinate matching, Address matching, and strict Pincode and Brand image matching. Removed Gemma fallback and forced `nemotron-ultra:latest` for extreme accuracy.
 
+### God Mode Page Scanner CDP Routing & Thread-Safety Fix
+- **CDP Fallback Routing**: Solved MakeMyTrip (MMT) and Goibibo Akamai bot detection by routing Page Scanner requests through the shared CDP Chrome instance on port 9222.
+- **PyQt6 GUI Thread-Safety Refactoring**: Resolved empty/invisible scanner results inside the God Mode UI tab by refactoring `_run_scan` and defining a thread-safe `PageScanWorker` class (subclassing `QThread`). The page scan execution is now offloaded from the GUI thread while GUI widget updates are properly delegated to the main thread via Qt signals, preventing silent UI failures and ensuring the detected checkboxes, tables, lists, and cards render correctly.
+
 
  
  
