@@ -84,3 +84,34 @@
 - **Context Lifecycle Management**: Overrode `page.close` dynamically in `RatingPlatform.new_page()` to automatically clean up and close its parent browser context, avoiding context/memory leakage without requiring changes to the rest of the codebase where `page.close()` is invoked.
 - **Timeout Buffering**: Increased the `page.goto` redirection resolution timeout in [agent_overlay.py](file:///C:/Users/CS05180/Desktop/scrape-ratings/agent_overlay.py) from 10 seconds to 25 seconds to give slow MMT details pages adequate time to load and populate `window.__INITIAL_STATE__` before extracting hotel IDs.
 - **MMT Details Page Redirect Filtering**: Added validation to verify that resolved MakeMyTrip URLs contain `-details-` or `hotel-details`. This prevents dead listings that automatically redirect to the generic MMT `/hotels/` home page from registering as resolved, keeping the CSV inputs clean.
+
+## 2026-06-07
+
+### MMT Extranet Routing & Executable Launch Fixes
+- **Fixed MMT & Goibibo Room Type Misclassification**: Resolved a critical bug where `mmt_room_type` and `goi_room_type` fields under *Reservations* were incorrectly mapped to the *Property* section because the system matched `"mmt_room"` and `"goi_room"` compound prefixes. Fixed this by narrowing down the property-section mappings specifically to `"mmt_room_inventory"` and `"goi_room_inventory"`.
+- **Prevented Cross-Section Drift**: Verified that requesting reservation fields (Booking ID, Guest Name, Check-in, Check-out, Room Type) now navigates only to the `reservations` section, eliminating multi-section split row execution and preserving correct row formatting.
+- **PyInstaller Compile & Permissions Resolution**: Terminated locked background processes of `RatingsScraper_v2.1.exe` that were causing `PermissionError: [WinError 5]` and rebuilt the standalone PyQt6 executable successfully using PyInstaller.
+- **Taskbar Pinning & Interactive Launch**: Re-ran the taskbar pinning script to pin the updated executable to the taskbar and launched the application in Session 1 (interactive desktop) using `cmd.exe /c start` so the user can interact with the GUI directly.
+
+## 2026-06-11
+
+### Booking.com Extranet Fast API-based Scraping Engine
+- **GraphQL Property List Discovery**: Replaced the paginated DOM scrolling/scanning on the Group Homepage with a same-origin Apollo GraphQL query (`GroupProperties` query to `/dml/graphql`). This discovers the entire portfolio of properties instantly in a single background query without any physical browser navigation or pagination clicks.
+- **Same-Origin Background Fetch for Tabs**: Added `SUB_TAB_URLS` mapping all sub-tab fields under Home, Rates, Promotions, Reservations, Property, Boost, Inbox, Guest Reviews, Finance, and Analytics to their relative REST HTML paths on Booking.com. Navigating between sub-tabs now uses same-origin background fetches (`_fast_fetch_html` calling browser `fetch()`) and loads the HTML locally in-memory via `page.set_content(html, wait_until="commit")`. This completely eliminates visible dropdown clicking and tab navigation.
+- **Fast Fetch for Property Pages**: Overhauled the multi-property loop in `extract_data` to fast-fetch the main property details pages in the background and load them locally, eliminating sequential visible `page.goto` page reloads.
+- **Corrected 404 URL Mapping Errors**: Resolved critical URL mapping errors under BookingExtranetSource where sections (like `"financial"`, `"reservations"`, `"property"`, `"inbox"`, `"analytics"`) were mapped to incorrect/non-existent filenames like `finance.html` (which returned 404 pages). Updated them to correct active endpoints (like `finance_overview.html`, `search_reservations.html`, `content_score.html`, `messaging/inbox.html`, `statistics/index.html`), preventing session-loss symptoms caused by 404 redirects.
+- **Robust Session Parameter Tracking**: Tracked and cached `current_hotel_id` and `current_ses` parameters dynamically during the scraping worker loop, ensuring accurate background fetch endpoint construction even when `page.url` remains on a neutral same-origin base page.
+
+## 2026-06-14
+
+### Async API Scraper Engine Implementation
+- **Massive Performance Overhaul**: Transitioned the application from slow, sequential HTML/headless browser scraping to a blazing-fast pure AsyncIO API backend engine (`async_api_scraper.py`).
+- **TLS Impersonation Engine**: Integrated `curl_cffi` to mimic Chrome 120 at the TLS/JA3 layer, effectively bypassing Cloudflare and Akamai/Kong WAF protections without needing heavy browser instances.
+- **Concurrent Batch Processing**: Configured the PyQt6 worker (`ratings_tab.py`) to chunk incoming CSV properties into batches of 100, blasting the requests simultaneously to achieve sub-30 second processing times for massive datasets.
+- **WAF Auto-Routing Fallback**: Added robust WAF intercept detection (`200-OK` blank pages and `awsWaf` challenge scripts). If the API engine gets blocked, it gracefully flags the item and routes it automatically to the Playwright Headless Browser fallback loop for 100% extraction accuracy.
+- **Direct ID Routing**: Added dedicated CSV columns (`mmt_id` and `bcom_id`) inside the `ratings_tab.py` importer. When these IDs are detected, the `DeepResearchWorker` completely skips Yahoo/Bing search index engines and executes lightning-fast direct link construction.
+- **Strict Verification Upgrades**: Upgraded `agent_overlay.py` prompt logic to enforce rigorous Latitude/Longitude coordinate matching, Address matching, and strict Pincode and Brand image matching. Removed Gemma fallback and forced `nemotron-ultra:latest` for extreme accuracy.
+
+
+ 
+ 

@@ -8,7 +8,7 @@ Three tools in one:
   3. Link Builder   – Build front-end URLs from partial hotel data
 """
 
-import re, csv, json, time, io
+import os, re, csv, json, time, io
 from pathlib import Path
 from collections import Counter
 from urllib.parse import urljoin, urlparse, parse_qs
@@ -558,7 +558,11 @@ class GodModeWorker(QThread):
 
             # Playwright async path (run in isolated event loop)
             async def _run_async():
+                import random
+                import asyncio
                 from playwright.async_api import async_playwright
+                # Prevent parallel threads from launching chromium at the exact same millisecond
+                await asyncio.sleep(random.uniform(0.2, 2.0))
                 async with async_playwright() as p:
                     browser = await p.chromium.launch(headless=True)
                     context = await browser.new_context(
@@ -567,7 +571,7 @@ class GodModeWorker(QThread):
                     # Block heavy items
                     await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "font", "media") else route.continue_())
                     page = await context.new_page()
-                    await page.set_default_timeout(25000)
+                    page.set_default_timeout(25000)
                     await page.goto(url, wait_until="domcontentloaded")
                     current_url = page.url.lower()
                     is_maps = "google.com/maps" in current_url or "maps.app.goo.gl" in current_url or "maps.google" in current_url or "/maps/" in current_url
@@ -617,6 +621,7 @@ class GodModeWorker(QThread):
                     return idx, row
             try:
                 idx, row = asyncio.run(_run_async())
+                return idx, row
             except Exception as e:
                 err_msg = str(e)[:100]
                 if is_any_maps:
@@ -668,16 +673,32 @@ class GodModeWorker(QThread):
 
 
 
+# ── Haversine Distance Helper ─────────────────────────────
+
+import math as _math
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Return great-circle distance in kilometres between two lat/lon points."""
+    R = 6371.0
+    dlat = _math.radians(lat2 - lat1)
+    dlon = _math.radians(lon2 - lon1)
+    a = (_math.sin(dlat / 2) ** 2
+         + _math.cos(_math.radians(lat1)) * _math.cos(_math.radians(lat2))
+         * _math.sin(dlon / 2) ** 2)
+    return R * 2 * _math.asin(_math.sqrt(a))
+
+
 # ── Bulk Parallel Listing Finder Worker ───────────────────
 
 class BulkParallelFinderWorker(QThread):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(list, str) # results list, output file path
 
-    def __init__(self, items, platforms):
+    def __init__(self, items, platforms, headers=None):
         super().__init__()
-        self.items = items # list of {'name': name, 'city': city}
+        self.items = items # list of dicts with name, city, latitude, longitude, address, row_data keys
         self.platforms = platforms
+        self.headers = headers
         self._stop = False
         self._pause = False
         self.results = []
@@ -699,11 +720,43 @@ class BulkParallelFinderWorker(QThread):
         total = len(self.items)
         self.results = []
 
+        # Determine max cols
+        max_parts = max([len(item.get('row_data', [])) for item in self.items]) if self.items else 2
+
         with sync_playwright() as p:
             try:
+                try:
+                    from settings_dialog import load_settings
+                    import random
+                    import time
+                    settings = load_settings()
+                    ua = settings.get("user_agent", "").strip()
+                    if not ua:
+                        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    
+                    proxy_config = None
+                    if settings.get("enable_proxies"):
+                        proxies = [p.strip() for p in settings.get("proxy_list", "").split('\n') if p.strip()]
+                        if proxies:
+                            sel = random.choice(proxies)
+                            proxy_config = {}
+                            if "@" in sel:
+                                proto_part, rest = sel.split("://") if "://" in sel else ("http", sel)
+                                up, hp = rest.split("@")
+                                u, p_wd = up.split(":")
+                                proxy_config['server'] = f"{proto_part}://{hp}"
+                                proxy_config['username'] = u
+                                proxy_config['password'] = p_wd
+                            else:
+                                proxy_config['server'] = sel
+                except Exception:
+                    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    proxy_config = None
+
                 browser = p.chromium.launch(headless=True)
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    user_agent=ua,
+                    proxy=proxy_config
                 )
                 context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
                 page = context.new_page()
@@ -720,6 +773,14 @@ class BulkParallelFinderWorker(QThread):
 
                 target_name = item.get('name', '')
                 city = item.get('city', '')
+                target_address = item.get('address', '')
+                target_lat = item.get('latitude', '')
+                target_lng = item.get('longitude', '')
+                row_data = item.get('row_data', [])
+
+                while len(row_data) < max_parts:
+                    row_data.append('')
+
                 cleaned_target = clean_hotel_name(target_name)
                 
                 self.progress.emit(idx + 1, total, f"Searching for: {target_name} ({city})")
@@ -727,40 +788,179 @@ class BulkParallelFinderWorker(QThread):
                 query = f"{cleaned_target} {city}".strip()
                 query_encoded = urllib.parse.quote_plus(query)
 
+                import db_cache
+                cached_res = db_cache.get_cached_parallel_finder(query, target_lat, target_lng)
+                if cached_res is not None:
+                    self.progress.emit(idx + 1, total, f"Cache Hit: {target_name} ({city})")
+                    for suffix in cached_res:
+                        res = list(row_data)
+                        res.extend(suffix)
+                        self.results.append(res)
+                    try:
+                        db_cache.update_batch_run('parallel_finder_batch', 'bulk_input', idx + 1, total, 'RUNNING', '')
+                    except Exception:
+                        pass
+                    continue
+
+                try:
+                    from settings_dialog import load_settings
+                    import random
+                    import time
+                    settings = load_settings()
+                    if settings.get("enable_jitter"):
+                        time.sleep(random.uniform(settings.get("jitter_min", 1), settings.get("jitter_max", 3)))
+                except Exception:
+                    pass
+
+                initial_results_len = len(self.results)
+                found_match = False
+
                 for platform in self.platforms:
                     if self._stop:
                         break
 
                     try:
                         if platform == 'booking':
-                            search_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
+                            # Restrict to India: add ss=<city> + cc=in so Booking only returns Indian properties
+                            city_encoded = urllib.parse.quote_plus(city) if city else ''
+                            search_url = (
+                                f"https://www.booking.com/searchresults.html"
+                                f"?ss={query_encoded}&ssne={city_encoded}&ssne_untouched={city_encoded}&cc=in"
+                            )
                             page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
-                            page.wait_for_timeout(1500)
-                            cards = page.query_selector_all('[data-testid="property-card"], [data-testid="sr-property-card-common"]')[:3]
-                            
+                            page.wait_for_timeout(2000)
+                            cards = page.query_selector_all('[data-testid="property-card"]')[:5]
+
                             for card in cards:
-                                name_el = card.query_selector('[data-testid="title"], h3, .sr-hotel__name')
+                                name_el = card.query_selector('[data-testid="title"]')
                                 name = name_el.inner_text().strip() if name_el else ''
                                 if not name:
                                     continue
-                                
-                                loc_el = card.query_selector('[data-testid="address"], [data-testid="location"]')
+
+                                loc_el = card.query_selector(
+                                    '[data-testid="address"], [data-testid="location"], '
+                                    'span[data-testid="address"], [class*="address"]'
+                                )
                                 location = loc_el.inner_text().strip() if loc_el else ''
 
-                                cleaned_cand = clean_hotel_name(name)
-                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
-                                similarity = int(ratio * 100)
-                                is_fab = 'fab' in name.lower()
+                                link_el = card.query_selector('a[data-testid="title-link"], a[href*="/hotel/in/"]')
+                                url = link_el.get_attribute('href') if link_el else ''
+                                if url and url.startswith('/'):
+                                    url = 'https://www.booking.com' + url
 
-                                self.results.append({
-                                    'target_name': target_name,
-                                    'target_city': city,
-                                    'candidate_name': name,
-                                    'platform': 'Booking.com',
-                                    'address': location or city,
-                                    'similarity': f"{similarity}%",
-                                    'verdict': 'FabHotel Chain' if is_fab else 'Potential Duplicate (Non-Fab)'
-                                })
+                                # REJECT hotels outside India (URL must contain /hotel/in/)
+                                if url and '/hotel/in/' not in url:
+                                    self.progress.emit(idx + 1, total, f"  ↳ Skipped (non-India URL): {name}")
+                                    continue
+
+                                # ── DEFINITIVE MATCH: extract lat/long + hotel_id from detail page ──
+                                # booking.env.b_map_center_latitude / b_map_center_longitude / b_hotel_id
+                                cand_lat = None
+                                cand_lng = None
+                                booking_hotel_id = ''
+                                first_photo = ''
+
+                                try:
+                                    detail_page = context.new_page()
+                                    detail_page.goto(url, timeout=25000, wait_until="domcontentloaded")
+                                    detail_page.wait_for_timeout(1500)
+
+                                    content = detail_page.content()
+
+                                    import re
+                                    lat_m = re.search(r'b_map_center_latitude\s*=\s*([\d.\-]+)', content)
+                                    lng_m = re.search(r'b_map_center_longitude\s*=\s*([\d.\-]+)', content)
+                                    id_m  = re.search(r"b_hotel_id\s*=\s*'?(\d+)'?", content)
+
+                                    if lat_m: cand_lat = float(lat_m.group(1))
+                                    if lng_m: cand_lng = float(lng_m.group(1))
+                                    if id_m:  booking_hotel_id = id_m.group(1)
+
+                                    # Get first real hotel photo from detail page
+                                    for img_el in detail_page.query_selector_all(
+                                        '[data-testid="photo-image"] img, .bh-photo-strip img, '
+                                        'img[class*="photo"], img[class*="hotel"]'
+                                    )[:5]:
+                                        src = img_el.get_attribute('src') or img_el.get_attribute('data-src') or ''
+                                        if is_valid_hotel_photo_url(src):
+                                            first_photo = src
+                                            break
+
+                                    detail_page.close()
+                                except Exception as de:
+                                    try: detail_page.close()
+                                    except Exception: pass
+                                    self.progress.emit(idx + 1, total, f"  ↳ Detail page error for {name}: {de}")
+
+                                # ── COORDINATE VERDICT ──
+                                dist_km = None
+                                coord_verdict = None
+
+                                try:
+                                    if (cand_lat and cand_lng and target_lat and target_lng
+                                            and str(target_lat).strip() and str(target_lng).strip()):
+                                        t_lat = float(str(target_lat).strip())
+                                        t_lng = float(str(target_lng).strip())
+                                        dist_km = haversine_km(t_lat, t_lng, cand_lat, cand_lng)
+
+                                        if dist_km <= 0.3:
+                                            coord_verdict = f"EXACT MATCH ({dist_km:.2f} km)"
+                                        elif dist_km <= 1.0:
+                                            coord_verdict = f"Very Close ({dist_km:.2f} km)"
+                                        elif dist_km <= 3.0:
+                                            coord_verdict = f"Nearby ({dist_km:.2f} km)"
+                                        else:
+                                            self.progress.emit(idx + 1, total,
+                                                f"  ↳ REJECTED by coordinates ({dist_km:.1f} km away): {name}")
+                                            continue
+                                except Exception:
+                                    pass  # Fallback to name+city if coords unavailable
+
+                                cleaned_cand = clean_hotel_name(name)
+                                ratio, addr_score, city_match = verify_candidate_enhanced(
+                                    cleaned_target, city, target_address, cleaned_cand, location)
+
+                                if not city_match and ratio < 0.80:
+                                    self.progress.emit(idx + 1, total,
+                                        f"  ↳ Rejected (city mismatch, {int(ratio*100)}%): {name}")
+                                    continue
+                                if city_match and ratio < 0.50:
+                                    self.progress.emit(idx + 1, total,
+                                        f"  ↳ Rejected (too dissimilar, {int(ratio*100)}%): {name}")
+                                    continue
+
+                                similarity = compute_unified_confidence(ratio, addr_score, dist_km)
+                                is_fab = 'fab' in name.lower()
+                                if is_fab:
+                                    verdict = 'FabHotel Chain'
+                                elif coord_verdict:
+                                    verdict = coord_verdict
+                                else:
+                                    verdict = 'Potential Duplicate (Non-Fab)' if city_match else 'City Mismatch Warning'
+                                coord_info = f"{dist_km:.2f} km" if dist_km is not None else f"No coords | {int(ratio*100)}% name match"
+
+                                if not location and url:
+                                    slug_match = re.search(r'/hotel/in/([^.?]+)', url)
+                                    if slug_match:
+                                        location = slug_match.group(1).replace('-', ' ').title()
+
+                                self.progress.emit(idx + 1, total,
+                                    f"  ✓ MATCH: {clean_hotel_name(name)} | BookingID={booking_hotel_id} | {coord_info if 'coord_info' in dir() else ''}")
+
+                                res = list(row_data)
+                                res.extend([
+                                    clean_hotel_name(name),
+                                    'Booking.com',
+                                    location or city,
+                                    f"{similarity}%",
+                                    verdict,
+                                    url,
+                                    first_photo,
+                                    booking_hotel_id,
+                                    f"{cand_lat},{cand_lng}" if cand_lat else '',
+                                ])
+                                self.results.append(res)
+                                found_match = True
 
                         elif platform == 'agoda':
                             search_url = f"https://www.agoda.com/search?text={query_encoded}"
@@ -776,21 +976,34 @@ class BulkParallelFinderWorker(QThread):
 
                                 loc_el = card.query_selector('[data-selenium="area-city-name"], .property-card-location')
                                 location = loc_el.inner_text().strip() if loc_el else ''
+                                
+                                link_el = card.query_selector('a[href*="/hotel/"], a')
+                                url = link_el.get_attribute('href') if link_el else ''
+                                if url and url.startswith('/'):
+                                    url = "https://www.agoda.com" + url
+                                    
+                                img_el = card.query_selector('img')
+                                first_photo = img_el.get_attribute('src') if img_el else ''
+                                if not is_valid_hotel_photo_url(first_photo):
+                                    first_photo = ''
 
                                 cleaned_cand = clean_hotel_name(name)
-                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
-                                similarity = int(ratio * 100)
+                                ratio, addr_score, city_match = verify_candidate_enhanced(cleaned_target, city, target_address, cleaned_cand, location)
+                                
+                                if not city_match and ratio < 0.8:
+                                    continue
+                                if city_match and ratio < 0.5:
+                                    continue
+                                
+                                similarity = compute_unified_confidence(ratio, addr_score)
                                 is_fab = 'fab' in name.lower()
+                                verdict = 'FabHotel Chain' if is_fab else ('Potential Duplicate (Non-Fab)' if city_match else 'City Mismatch Warning')
 
-                                self.results.append({
-                                    'target_name': target_name,
-                                    'target_city': city,
-                                    'candidate_name': name,
-                                    'platform': 'Agoda',
-                                    'address': location or city,
-                                    'similarity': f"{similarity}%",
-                                    'verdict': 'FabHotel Chain' if is_fab else 'Potential Duplicate (Non-Fab)'
-                                })
+                                res = list(row_data)
+                                res.extend([name, 'Agoda', location, f"{similarity}%", verdict, url, first_photo, '', ''])
+                                self.results.append(res)
+                                found_match = True
+                                found_match = True
 
                         elif platform == 'expedia':
                             search_url = f"https://www.expedia.com/Hotel-Search?destination={query_encoded}"
@@ -806,21 +1019,34 @@ class BulkParallelFinderWorker(QThread):
 
                                 loc_el = card.query_selector('[data-test-id="neighborhood"]')
                                 location = loc_el.inner_text().strip() if loc_el else ''
+                                
+                                link_el = card.query_selector('a')
+                                url = link_el.get_attribute('href') if link_el else ''
+                                if url and url.startswith('/'):
+                                    url = "https://www.expedia.com" + url
+                                    
+                                img_el = card.query_selector('img')
+                                first_photo = img_el.get_attribute('src') if img_el else ''
+                                if not is_valid_hotel_photo_url(first_photo):
+                                    first_photo = ''
 
                                 cleaned_cand = clean_hotel_name(name)
-                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
-                                similarity = int(ratio * 100)
+                                ratio, addr_score, city_match = verify_candidate_enhanced(cleaned_target, city, target_address, cleaned_cand, location)
+                                
+                                if not city_match and ratio < 0.8:
+                                    continue
+                                if city_match and ratio < 0.5:
+                                    continue
+                                
+                                similarity = compute_unified_confidence(ratio, addr_score)
                                 is_fab = 'fab' in name.lower()
+                                verdict = 'FabHotel Chain' if is_fab else ('Potential Duplicate (Non-Fab)' if city_match else 'City Mismatch Warning')
 
-                                self.results.append({
-                                    'target_name': target_name,
-                                    'target_city': city,
-                                    'candidate_name': name,
-                                    'platform': 'Expedia',
-                                    'address': location or city,
-                                    'similarity': f"{similarity}%",
-                                    'verdict': 'FabHotel Chain' if is_fab else 'Potential Duplicate (Non-Fab)'
-                                })
+                                res = list(row_data)
+                                res.extend([name, 'Expedia', location, f"{similarity}%", verdict, url, first_photo, '', ''])
+                                self.results.append(res)
+                                found_match = True
+                                found_match = True
 
                         elif platform == 'mmt':
                             search_url = f"https://www.makemytrip.com/hotels/hotel-listing/?searchText={query_encoded}"
@@ -836,24 +1062,59 @@ class BulkParallelFinderWorker(QThread):
 
                                 loc_el = card.query_selector('span[class*="location"]')
                                 location = loc_el.inner_text().strip() if loc_el else ''
+                                
+                                link_el = card.query_selector('a[href*="/hotels/"]')
+                                url = link_el.get_attribute('href') if link_el else ''
+                                if url and url.startswith('/'):
+                                    url = "https://www.makemytrip.com" + url
+                                    
+                                img_el = card.query_selector('img')
+                                first_photo = img_el.get_attribute('src') if img_el else ''
+                                if not is_valid_hotel_photo_url(first_photo):
+                                    first_photo = ''
 
                                 cleaned_cand = clean_hotel_name(name)
-                                ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), cleaned_cand.lower()).ratio()
-                                similarity = int(ratio * 100)
+                                ratio, addr_score, city_match = verify_candidate_enhanced(cleaned_target, city, target_address, cleaned_cand, location)
+                                
+                                if not city_match and ratio < 0.8:
+                                    continue
+                                if city_match and ratio < 0.5:
+                                    continue
+                                
+                                similarity = compute_unified_confidence(ratio, addr_score)
                                 is_fab = 'fab' in name.lower()
+                                verdict = 'FabHotel Chain' if is_fab else ('Potential Duplicate (Non-Fab)' if city_match else 'City Mismatch Warning')
 
-                                self.results.append({
-                                    'target_name': target_name,
-                                    'target_city': city,
-                                    'candidate_name': name,
-                                    'platform': 'MakeMyTrip',
-                                    'address': location or city,
-                                    'similarity': f"{similarity}%",
-                                    'verdict': 'FabHotel Chain' if is_fab else 'Potential Duplicate (Non-Fab)'
-                                })
+                                res = list(row_data)
+                                res.extend([name, 'MakeMyTrip', location, f"{similarity}%", verdict, url, first_photo, '', ''])
+                                self.results.append(res)
+                                found_match = True
+                                found_match = True
 
                     except Exception as e:
-                        pass
+                        self.progress.emit(idx + 1, total, f"⚠️ Error on {platform}: {e}")
+
+                if not found_match:
+                    res = list(row_data)
+                    res.extend([
+                        '', # Candidate Name
+                        '', # Platform
+                        '', # Candidate Address
+                        '', # Name Similarity
+                        'No Match Found', # Verdict
+                        '', # Candidate URL
+                        '', # Candidate Photo URL
+                        '', # Booking Hotel ID
+                        ''  # Candidate Lat,Long
+                    ])
+                    self.results.append(res)
+
+                try:
+                    added_suffixes = [r[len(row_data):] for r in self.results[initial_results_len:]]
+                    db_cache.set_cached_parallel_finder(query, target_lat, target_lng, added_suffixes)
+                    db_cache.update_batch_run('parallel_finder_batch', 'bulk_input', idx + 1, total, 'RUNNING', '')
+                except Exception:
+                    pass
 
             try:
                 browser.close()
@@ -863,12 +1124,32 @@ class BulkParallelFinderWorker(QThread):
         # Write multi-row CSV
         output_path = str(Path.home() / "Downloads" / f"parallel_listings_{int(time.time())}.csv")
         try:
-            fieldnames = ['Target Hotel Name', 'Target City', 'Candidate Name', 'Platform', 'Candidate Address', 'Name Similarity', 'Verdict']
+            db_cache.update_batch_run('parallel_finder_batch', 'bulk_input', total, total, 'FINISHED', output_path)
+        except Exception:
+            pass
+        try:
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
+                writer = csv.writer(f)
+                if self.headers:
+                    header_prefix = self.headers
+                else:
+                    header_prefix = [f"Col {i+1}" for i in range(max_parts)]
+                    if max_parts >= 2:
+                        header_prefix[0] = 'Target Name'
+                        header_prefix[1] = 'Target City'
+                fieldnames = header_prefix + ['Candidate Name', 'Platform', 'Candidate Address', 'Name Similarity', 'Verdict', 'Candidate URL', 'Candidate Photo URL', 'Booking Hotel ID', 'Candidate Lat,Long']
+                writer.writerow(fieldnames)
                 for res in self.results:
                     writer.writerow(res)
+            
+            # Generate Dashboard HTML
+            try:
+                from dashboard_generator import generate_dashboard_report
+                html_path = output_path.replace('.csv', '_dashboard.html')
+                generate_dashboard_report(self.results, fieldnames, html_path)
+            except Exception as d_err:
+                print(f"Error generating dashboard: {d_err}")
+                
         except Exception as e:
             print(f"Error writing CSV: {e}")
 
@@ -1266,7 +1547,7 @@ class ParallelListingWorker(QThread):
 
         with sync_playwright() as p:
             try:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
                 context = browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1280, "height": 800},
@@ -1321,7 +1602,7 @@ class ParallelListingWorker(QThread):
                                 print(f"Failed to load MMT cookies: {e}")
                         search_url = f"https://www.makemytrip.com/hotels/hotel-listing/?searchText={query_encoded}"
                         page.goto(search_url, timeout=25000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(2500)
+                        page.wait_for_timeout(3500)
                         cards = page.query_selector_all('.infinite-scroll-component > div, [class*="ListingCard"]')[:5]
 
                     for card in cards:
@@ -1515,23 +1796,160 @@ class ParallelListingWorker(QThread):
         self.finished.emit(self.candidates)
 
 
+# ── Image Validation Helper ───────────────────────────────
+
+def is_valid_hotel_photo_url(url: str) -> bool:
+    """Filter out non-hotel assets such as flags, logos, avatars, badges, etc."""
+    if not url:
+        return False
+    url_lower = url.lower()
+    rejects = ["flag", "logo", "icon", "design-assets", "sprite", "checkmark", "star", "badge", "avatar", "marker", "map", "heart", "share"]
+    if any(x in url_lower for x in rejects):
+        return False
+    if not (url_lower.startswith("http://") or url_lower.startswith("https://") or url_lower.startswith("//") or url_lower.startswith("data:image")):
+        return False
+    return True
+
 # ── Clean Hotel Name Helper (FabHotels Duplicate Checking) ──
 
 def clean_hotel_name(name: str) -> str:
-    """Strip common brand prefixes and Devanagari/Hindi characters and window texts."""
+    """Strip brand prefixes, Devanagari/Hindi chars, and all non-Latin UI text."""
     if not name:
         return ""
-    # Strip Hindi phrases and Devanagari characters
-    name = re.sub(r'नई\s+विंडो\s+में\s+खुलता\s+है', '', name)
-    name = re.sub(r'[\u0900-\u097F]+', '', name)
-    # Strip common window/open texts (without word boundaries to catch attached text like InnOpens in new window)
-    name = re.sub(r'(?i)opens?\s*in\s*(?:a\s*)?new\s*windows?', '', name)
-    name = re.sub(r'(?i)opens?\s*new\s*windows?', '', name)
+    # Strip ALL Devanagari / Hindi Unicode block characters (\u0900-\u097F)
+    name = re.sub(r'[\u0900-\u097F\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF\u0B00-\u0B7F]+', '', name)
+    # Strip common window/open texts in any language appended to the name
+    name = re.sub(r'(?i)opens?\s*in\s*(?:a\s*)?new\s*(?:window|tab)s?', '', name)
+    name = re.sub(r'(?i)opens?\s*new\s*(?:window|tab)s?', '', name)
+    # Strip non-ASCII characters that sneak through (Hindi UI, icons, etc.)
+    name = name.encode('ascii', 'ignore').decode('ascii')
     # Strip common brand prefixes/suffixes
     name = re.sub(r'\b(?:fabhotel|fabhotels|fabexpress|fab)\b', '', name, flags=re.IGNORECASE)
     # Clean whitespace
     return re.sub(r'\s+', ' ', name).strip()
 
+
+
+def compute_address_score(target_address, cand_location):
+    import re
+    if not target_address or not cand_location:
+        return 0.5
+        
+    fillers = {"the", "a", "near", "opposite", "behind", "hotel", "resort", "inn", "stay", "and", "of", "to", "for", "with", "at", "by", "on"}
+    
+    def tokenize(text):
+        text = text.lower()
+        text = text.replace("rd.", "road").replace("rd", "road")
+        text = text.replace("st.", "street").replace("st", "street")
+        text = text.replace("sec.", "sector").replace("sec", "sector")
+        tokens = re.findall(r'\b\w+\b', text)
+        return [t for t in tokens if t not in fillers and len(t) > 1]
+
+    t_tokens = tokenize(target_address)
+    c_tokens = tokenize(cand_location)
+    
+    if not t_tokens or not c_tokens:
+        return 0.5
+        
+    def is_critical_token(t):
+        return t.isdigit() or any(suffix in t for suffix in ("nagar", "sector", "road", "street", "lane", "colony", "enclave", "vihar", "chowk"))
+        
+    t_critical = set(t for t in t_tokens if is_critical_token(t))
+    c_critical = set(c for c in c_tokens if is_critical_token(c))
+    
+    intersection = set(t_tokens) & set(c_tokens)
+    
+    t_sectors = set(t for t in t_tokens if t.startswith("sector") or (t.isdigit() and len(t) <= 3))
+    c_sectors = set(c for c in c_tokens if c.startswith("sector") or (c.isdigit() and len(c) <= 3))
+    if t_sectors and c_sectors and not (t_sectors & c_sectors):
+        return 0.1
+        
+    score = len(intersection) / max(1, min(len(t_tokens), len(c_tokens)))
+    if t_critical & c_critical:
+        score = min(1.0, score + 0.2)
+        
+    return score
+
+def compute_unified_confidence(name_similarity, address_score, dist_km=None):
+    name_score = name_similarity
+    addr_score = address_score
+    
+    if dist_km is not None:
+        if dist_km <= 0.3:
+            dist_score = 1.0
+        elif dist_km >= 3.0:
+            dist_score = 0.0
+        else:
+            dist_score = 1.0 - (dist_km - 0.3) / 2.7
+        conf = (name_score * 0.40) + (dist_score * 0.40) + (addr_score * 0.20)
+    else:
+        conf = (name_score * 0.50) + (addr_score * 0.50)
+        
+    return int(conf * 100)
+
+def verify_candidate_enhanced(target_name, target_city, target_address, cand_name, cand_location):
+    import difflib
+    import re
+    target_name_c = target_name.lower().strip()
+    cand_name_c   = cand_name.lower().strip()
+    target_city_c = target_city.lower().strip()
+    cand_loc_c    = cand_location.lower().strip()
+    target_add_c  = (target_address or "").lower().strip()
+
+    name_similarity = difflib.SequenceMatcher(None, target_name_c, cand_name_c).ratio()
+    address_score = compute_address_score(target_add_c or target_city_c, cand_loc_c)
+
+    city_match = False
+    if cand_loc_c:
+        if target_city_c in cand_loc_c:
+            city_match = True
+        else:
+            tc_tokens = set(re.findall(r'\w{4,}', target_city_c))
+            cl_tokens = set(re.findall(r'\w{4,}', cand_loc_c))
+            if tc_tokens & cl_tokens:
+                city_match = True
+            if not city_match and target_add_c:
+                ta_tokens = set(re.findall(r'\w{5,}', target_add_c))
+                if ta_tokens & cl_tokens:
+                    city_match = True
+
+    return name_similarity, address_score, city_match
+
+# ── Exact Match Helper ────────────────────────────────────
+
+def verify_candidate(target_name, target_city, target_address, cand_name, cand_location):
+    """
+    Returns (similarity_ratio, city_match_bool).
+    CRITICAL FIX: empty cand_location must NOT count as a city match.
+    In Python, '' in 'mumbai' is True — that was the root cause of Jamshedpur false matches.
+    """
+    import difflib
+    target_name_c = target_name.lower().strip()
+    cand_name_c   = cand_name.lower().strip()
+    target_city_c = target_city.lower().strip()
+    cand_loc_c    = cand_location.lower().strip()   # may be empty
+    target_add_c  = (target_address or "").lower().strip()
+
+    # Name similarity
+    ratio = difflib.SequenceMatcher(None, target_name_c, cand_name_c).ratio()
+
+    # City / Location overlap
+    # GUARD: never treat empty cand_location as a match
+    city_match = False
+    if cand_loc_c:  # only run if we actually have a location string
+        if target_city_c in cand_loc_c or target_city_c in cand_loc_c:
+            city_match = True
+        else:
+            tc_tokens = set(re.findall(r'\w{4,}', target_city_c))
+            cl_tokens = set(re.findall(r'\w{4,}', cand_loc_c))
+            if tc_tokens & cl_tokens:
+                city_match = True
+            if not city_match and target_add_c:
+                ta_tokens = set(re.findall(r'\w{5,}', target_add_c))
+                if ta_tokens & cl_tokens:
+                    city_match = True
+
+    return ratio, city_match
 
 
 # ── Link Builder ──────────────────────────────────────────
@@ -1912,6 +2330,17 @@ class GodModeTab(QWidget):
         self.parallel_city_input.setPlaceholderText("e.g. Mumbai")
         target_grid.addWidget(self.parallel_city_input, 1, 1)
 
+        # Lat/Long input + button
+        target_grid.addWidget(QLabel("Lat, Long:"), 2, 0)
+        lat_long_layout = QHBoxLayout()
+        self.parallel_lat_long_input = QLineEdit()
+        self.parallel_lat_long_input.setPlaceholderText("e.g. 18.9217, 72.8332")
+        lat_long_layout.addWidget(self.parallel_lat_long_input)
+        self.geocode_btn = QPushButton("Lookup Hotel")
+        self.geocode_btn.clicked.connect(self.reverse_geocode)
+        lat_long_layout.addWidget(self.geocode_btn)
+        target_grid.addLayout(lat_long_layout, 2, 1)
+
         # Platform checkboxes row
         cb_row = QHBoxLayout()
         cb_row.addWidget(QLabel("Platforms to Search:"))
@@ -1932,7 +2361,7 @@ class GodModeTab(QWidget):
         self.cb_expedia.setChecked(True)
         cb_row.addWidget(self.cb_expedia)
 
-        target_grid.addLayout(cb_row, 2, 0, 1, 2)
+        target_grid.addLayout(cb_row, 3, 0, 1, 2)
 
         # Search buttons
         btn_row = QHBoxLayout()
@@ -1947,7 +2376,7 @@ class GodModeTab(QWidget):
         self.parallel_stop_btn.setEnabled(False)
         btn_row.addWidget(self.parallel_stop_btn)
 
-        target_grid.addLayout(btn_row, 3, 0, 1, 2)
+        target_grid.addLayout(btn_row, 4, 0, 1, 2)
 
         left_layout.addWidget(target_group)
 
@@ -1964,12 +2393,6 @@ class GodModeTab(QWidget):
         self.parallel_table.horizontalHeader().setStretchLastSection(True)
         self.parallel_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         results_layout.addWidget(self.parallel_table)
-
-        # Copy Results for Excel button
-        self.parallel_copy_btn = QPushButton("Copy Results for Excel / Google Sheets")
-        self.parallel_copy_btn.setStyleSheet("background-color: #27ae60; font-weight: bold; padding: 10px; margin-top: 5px;")
-        self.parallel_copy_btn.clicked.connect(self.copy_parallel_results_to_clipboard)
-        results_layout.addWidget(self.parallel_copy_btn)
 
         left_layout.addWidget(results_group, 1)
 
@@ -2030,6 +2453,11 @@ class GodModeTab(QWidget):
         self.bulk_parallel_stop_btn.setStyleSheet("background-color: #c0392b; font-weight: bold;")
         self.bulk_parallel_stop_btn.setEnabled(False)
         ctrl_row2.addWidget(self.bulk_parallel_stop_btn)
+
+        self.bulk_parallel_settings_btn = QPushButton("⚙ Settings")
+        self.bulk_parallel_settings_btn.clicked.connect(self.show_parallel_settings)
+        self.bulk_parallel_settings_btn.setStyleSheet("background-color: #4a5568; font-weight: bold;")
+        ctrl_row2.addWidget(self.bulk_parallel_settings_btn)
 
         bulk_layout.addLayout(ctrl_row2)
 
@@ -2485,7 +2913,50 @@ class GodModeTab(QWidget):
         self.bulk_link_log.append(f"\nDONE! Working links saved to: {output_path}")
 
 
-    # ── Parallel Listing Finder Logic ──────────────────────
+    # ── Lat/Long Geocode Action ───────────────────────────
+    def reverse_geocode(self):
+        lat_long_text = self.parallel_lat_long_input.text().strip()
+        if not lat_long_text:
+            QMessageBox.warning(self, "Error", "Please enter Latitude and Longitude.")
+            return
+
+        parts = [p.strip() for p in lat_long_text.split(',')]
+        if len(parts) != 2:
+            QMessageBox.warning(self, "Error", "Format should be: Lat, Long (e.g. 18.9217, 72.8332)")
+            return
+            
+        lat, lon = parts[0], parts[1]
+        self.parallel_log.append(f"Looking up location for {lat}, {lon}...")
+        
+        import urllib.request
+        
+        try:
+            url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
+            req = urllib.request.Request(url, headers={'User-Agent': 'HotelDataTools/2.1'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                
+            if 'address' in data:
+                addr = data['address']
+                hotel_name = addr.get('hotel') or addr.get('building') or addr.get('amenity') or addr.get('tourism') or addr.get('commercial')
+                city = addr.get('city') or addr.get('town') or addr.get('village') or addr.get('county') or addr.get('state_district')
+                
+                if hotel_name:
+                    self.parallel_name_input.setText(hotel_name)
+                    if city:
+                        self.parallel_city_input.setText(city)
+                    self.parallel_log.append(f"✓ Found: {hotel_name} in {city}")
+                else:
+                    self.parallel_log.append("No specific hotel/building name found at this exact coordinate.")
+                    self.parallel_log.append(f"Address: {data.get('display_name', '')}")
+            else:
+                self.parallel_log.append("No address data returned.")
+                
+        except Exception as e:
+            self.parallel_log.append(f"Error looking up coordinates: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to lookup coordinates: {e}")
+
+    # ── Parallel Listing Actions ────────────────────────────
 
     def start_parallel_search(self):
         name = self.parallel_name_input.text().strip()
@@ -2666,13 +3137,139 @@ class GodModeTab(QWidget):
             return
 
         items = []
-        for line in text.split('\n'):
-            line = line.strip()
-            if not line or line.lower().startswith('hotel name'):
-                continue
-            parts = [p.strip() for p in line.split(',')]
+        import csv
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        if not lines:
+            return
+
+        # Check if first line is a header
+        first_line = lines[0]
+        try:
+            headers = next(csv.reader([first_line]))
+            is_header = any(x in first_line.lower() for x in ('name', 'city', 'col', 'lat', 'lng', 'long', 'address', 'pincode'))
+        except:
+            headers = [p.strip() for p in first_line.split(',')]
+            is_header = False
+
+        data_rows_start = 1 if is_header else 0
+        self.bulk_parallel_headers = headers if is_header else None
+
+        # Sample data row to auto-detect columns
+        sample_row = None
+        for line in lines[data_rows_start:]:
+            if '\t' in line:
+                parts = [p.strip() for p in line.split('\t')]
+            else:
+                try:
+                    parts = next(csv.reader([line]))
+                except:
+                    parts = [p.strip() for p in line.split(',')]
             if len(parts) >= 2:
-                items.append({'name': parts[0], 'city': parts[1]})
+                sample_row = parts
+                break
+
+        # Defaults
+        name_idx = 0
+        city_idx = 1
+        addr_idx = None
+        lat_idx = None
+        lng_idx = None
+        id_idx = None
+
+        if sample_row:
+            col_scores = []
+            for col_i, val in enumerate(sample_row):
+                val_clean = val.strip()
+                val_lower = val_clean.lower()
+                header_name = headers[col_i].lower().strip() if is_header and col_i < len(headers) else ""
+                
+                scores = {'id': 0, 'name': 0, 'city': 0, 'address': 0, 'lat': 0, 'lng': 0, 'pincode': 0}
+                
+                # Check numeric values
+                try:
+                    num_val = float(val_clean)
+                    if 8.0 <= num_val <= 38.0:
+                        scores['lat'] += 10
+                    elif 68.0 <= num_val <= 98.0:
+                        scores['lng'] += 10
+                    elif len(val_clean) == 6 and val_clean.isdigit():
+                        scores['pincode'] += 10
+                    else:
+                        scores['id'] += 5
+                except ValueError:
+                    if len(val_clean) > 0:
+                        if ',' in val_clean or len(val_clean) > 30 or any(x in val_lower for x in ('road', 'street', 'behind', 'near', 'opposite', 'nagar', 'colony', 'marg')):
+                            scores['address'] += 10
+                        elif any(x in val_lower for x in ('hotel', 'inn', 'residency', 'palace', 'villa', 'suites', 'comfort')):
+                            scores['name'] += 10
+                        elif len(val_clean) < 20:
+                            scores['city'] += 5
+
+                # Header check
+                if header_name:
+                    if 'id' in header_name or 'code' in header_name:
+                        scores['id'] += 15
+                    if 'name' in header_name:
+                        scores['name'] += 15
+                    if 'city' in header_name or 'location' in header_name:
+                        scores['city'] += 15
+                    if 'address' in header_name or 'addr' in header_name:
+                        scores['address'] += 15
+                    if 'latitude' in header_name or 'lat' in header_name:
+                        scores['lat'] += 15
+                    if 'longitude' in header_name or 'lng' in header_name or 'long' in header_name or 'lon' in header_name:
+                        scores['lng'] += 15
+                    if 'pincode' in header_name or 'pin' in header_name:
+                        scores['pincode'] += 15
+                
+                col_scores.append(scores)
+
+            if col_scores:
+                # Find indices using highest scores
+                name_idx = max(range(len(col_scores)), key=lambda idx: col_scores[idx]['name'])
+                city_idx = max(range(len(col_scores)), key=lambda idx: col_scores[idx]['city'] if idx != name_idx else -1)
+                
+                addr_score_idx = max(range(len(col_scores)), key=lambda idx: col_scores[idx]['address'] if idx not in (name_idx, city_idx) else -1)
+                if col_scores[addr_score_idx]['address'] >= 5:
+                    addr_idx = addr_score_idx
+                    
+                lat_score_idx = max(range(len(col_scores)), key=lambda idx: col_scores[idx]['lat'])
+                if col_scores[lat_score_idx]['lat'] >= 5:
+                    lat_idx = lat_score_idx
+                    
+                lng_score_idx = max(range(len(col_scores)), key=lambda idx: col_scores[idx]['lng'])
+                if col_scores[lng_score_idx]['lng'] >= 5:
+                    lng_idx = lng_score_idx
+                    
+                id_score_idx = max(range(len(col_scores)), key=lambda idx: col_scores[idx]['id'] if idx not in (name_idx, city_idx, addr_idx) else -1)
+                if col_scores[id_score_idx]['id'] >= 5:
+                    id_idx = id_score_idx
+
+        for line in lines[data_rows_start:]:
+            if '\t' in line:
+                parts = [p.strip() for p in line.split('\t')]
+            else:
+                try:
+                    parts = next(csv.reader([line]))
+                except:
+                    parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 2:
+                item_name = parts[name_idx] if name_idx < len(parts) else ""
+                item_city = parts[city_idx] if city_idx < len(parts) else ""
+                item_addr = parts[addr_idx] if (addr_idx is not None and addr_idx < len(parts)) else ""
+                item_lat = parts[lat_idx] if (lat_idx is not None and lat_idx < len(parts)) else ""
+                item_lng = parts[lng_idx] if (lng_idx is not None and lng_idx < len(parts)) else ""
+                item_id = parts[id_idx] if (id_idx is not None and id_idx < len(parts)) else ""
+
+                items.append({
+                    'name': item_name,
+                    'city': item_city,
+                    'address': item_addr,
+                    'latitude': item_lat,
+                    'longitude': item_lng,
+                    'hotel_id': item_id,
+                    'row_data': parts
+                })
 
         if not items:
             QMessageBox.warning(self, "Invalid Input", "Could not parse any valid items. Format: Name, City")
@@ -2707,11 +3304,10 @@ class GodModeTab(QWidget):
         self.bulk_parallel_progress.setMaximum(len(items))
         self.bulk_parallel_progress.setValue(0)
 
-        self.bulk_parallel_worker = BulkParallelFinderWorker(items, platforms)
+        self.bulk_parallel_worker = BulkParallelFinderWorker(items, platforms, headers=getattr(self, 'bulk_parallel_headers', None))
         self.bulk_parallel_worker.progress.connect(self.on_bulk_parallel_progress)
         self.bulk_parallel_worker.finished.connect(self.on_bulk_parallel_finished)
         self.bulk_parallel_worker.start()
-
     def pause_bulk_parallel(self):
         if hasattr(self, 'bulk_parallel_worker') and self.bulk_parallel_worker.isRunning():
             if not self.bulk_parallel_worker._pause:
@@ -2754,3 +3350,53 @@ class GodModeTab(QWidget):
                     QMessageBox.information(self, "Success", f"File saved to:\n{save_path}")
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to save file:\n{e}")
+
+    def show_parallel_settings(self):
+        from settings_dialog import SettingsDialog
+        dialog = SettingsDialog(self, on_resume_callback=self.resume_parallel_finder)
+        dialog.exec()
+
+    def resume_parallel_finder(self, run_data):
+        input_file = run_data.get("input_file")
+        if input_file and os.path.exists(input_file):
+            try:
+                with open(input_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                self.bulk_parallel_input.setPlainText(content)
+                self.bulk_parallel_log.append(f"Resuming run using input file: {input_file}")
+                self.start_bulk_parallel()
+            except Exception as e:
+                self.bulk_parallel_log.append(f"Failed to resume parallel finder: {e}")
+
+    # ── Samples & Utilities ──────────────────────────────────────
+
+    def _save_sample_csv(self, headers: list, default_name: str, mock_rows: list):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Sample CSV", default_name, "CSV Files (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                writer.writerows(mock_rows)
+            QMessageBox.information(self, "Success", f"Sample CSV saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save CSV:\n{e}")
+
+    def download_link_sample(self):
+        headers = ["Hotel Name", "City", "FHID", "URL"]
+        rows = [
+            ["FabHotel Raj Villa", "Indore", "1234", "http://booking.com/..."],
+            ["FabHotel The Corporate", "Mumbai", "", ""]
+        ]
+        self._save_sample_csv(headers, "sample_link_builder.csv", rows)
+
+    def download_parallel_sample(self):
+        headers = ["Hotel Name", "City"]
+        rows = [
+            ["FabHotel Raj Villa", "Indore"],
+            ["FabHotel The Corporate", "Mumbai"]
+        ]
+        self._save_sample_csv(headers, "sample_parallel_finder.csv", rows)
+
+    

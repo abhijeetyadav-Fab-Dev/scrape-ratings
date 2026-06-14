@@ -29,17 +29,83 @@ class DeepResearchSignals(QObject):
 class DeepResearchWorker(threading.Thread):
     """Crawl the web to identify listing codes, official pages or details for a hotel name/query."""
     
-    def __init__(self, query: str, platform_filter: str = 'any', deep_extract: bool = False):
+    def __init__(self, query: str, platform_filter: str = 'any', deep_extract: bool = False, items_context: list = None, find_parallel: bool = False):
         super().__init__()
         self.query = query
         self.platform_filter = platform_filter
         self.deep_extract = deep_extract
+        self.items_context = items_context or []
+        self.find_parallel = find_parallel
         self.signals = DeepResearchSignals()
         self.daemon = True
 
     def run(self):
+        def extract_coordinates(p_obj):
+            try:
+                content = p_obj.content()
+                import re
+                lat_m = re.search(r'b_map_center_latitude\s*=\s*([\d.\-]+)', content)
+                lng_m = re.search(r'b_map_center_longitude\s*=\s*([\d.\-]+)', content)
+                if lat_m and lng_m:
+                    return float(lat_m.group(1)), float(lng_m.group(1))
+
+                coords = p_obj.evaluate('''() => {
+                    let latMeta = document.querySelector('meta[itemprop="latitude"]');
+                    let lonMeta = document.querySelector('meta[itemprop="longitude"]');
+                    if (latMeta && lonMeta) {
+                        return {lat: latMeta.content, lon: lonMeta.content};
+                    }
+                    let mapEl = document.querySelector('[data-atlas-latlng]');
+                    if (mapEl) {
+                        let parts = mapEl.getAttribute('data-atlas-latlng').split(',');
+                        if (parts.length === 2) {
+                            return {lat: parts[0], lon: parts[1]};
+                        }
+                    }
+                    for (let script of document.querySelectorAll('script[type="application/ld+json"]')) {
+                        try {
+                            let json = JSON.parse(script.textContent);
+                            if (json && json.geo) {
+                                return {lat: json.geo.latitude, lon: json.geo.longitude};
+                            }
+                            if (json && json['@graph']) {
+                                for (let item of json['@graph']) {
+                                    if (item.geo) {
+                                        return {lat: item.geo.latitude, lon: item.geo.longitude};
+                                    }
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                    let match = document.body.innerHTML.match(/"latitude":\s*(-?\d+\.\d+),\s*"longitude":\s*(-?\d+\.\d+)/);
+                    if (match) {
+                        return {lat: match[1], lon: match[2]};
+                    }
+                    return null;
+                }''')
+                if coords and coords.get('lat') and coords.get('lon'):
+                    return float(coords['lat']), float(coords['lon'])
+            except Exception as ce:
+                self.signals.log.emit(f"    ⚠️ Failed to extract page coordinates: {ce}")
+            return None, None
+
+        def get_distance_km(lat1, lon1, lat2, lon2):
+            import math
+            try:
+                R = 6371.0
+                dlat = math.radians(lat2 - lat1)
+                dlon = math.radians(lon2 - lon1)
+                a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+                c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+                return R * c
+            except Exception:
+                return None
+
         # Split query by lines or commas for bulk search
-        raw_queries = [q.strip() for q in re.split(r'\n|,', self.query) if q.strip()]
+        if self.items_context:
+            raw_queries = [q.strip() for q in self.query.split('\n')]
+        else:
+            raw_queries = [q.strip() for q in re.split(r'\n|,', self.query) if q.strip()]
         
         conversational_phrases = [
             "get me frontend links for these hotels",
@@ -60,22 +126,27 @@ class DeepResearchWorker(threading.Thread):
         ]
         
         valid_queries = []
-        for q in raw_queries:
+        for i, q in enumerate(raw_queries):
             q_lower = q.lower()
             is_filler = False
             for phrase in conversational_phrases:
                 if q_lower == phrase or q_lower == phrase + " ?" or q_lower == phrase + " -":
                     is_filler = True
                     break
-            if not is_filler:
+            if is_filler:
+                if self.items_context:
+                    # Keep as empty to preserve index/1-to-1 mapping
+                    valid_queries.append((i, ""))
+                else:
+                    pass
+            else:
                 # Clean inline parts
                 for phrase in conversational_phrases:
                     q = re.sub(rf'(?i)\b{re.escape(phrase)}\b', '', q).strip()
                 q = q.replace('-', '').strip()
-                if q:
-                    valid_queries.append(q)
+                valid_queries.append((i, q))
 
-        if not valid_queries:
+        if not any(target for idx, target in valid_queries):
             self.signals.log.emit("❌ No valid hotel names found in query after sanitization.")
             self.signals.finished.emit({'error': 'No valid queries'})
             return
@@ -86,10 +157,20 @@ class DeepResearchWorker(threading.Thread):
         try:
             browser = _get_headless_browser()
             
-            for i, target in enumerate(valid_queries, 1):
-                if i > 1:
+            for step_num, (orig_idx, target) in enumerate(valid_queries, 1):
+                if step_num > 1:
                     self.signals.log.emit("  ⏳ Waiting to prevent rate limits...")
                     time.sleep(3.5)
+                
+                if not target:
+                    self.signals.finished.emit({
+                        'query_index': orig_idx,
+                        'url': '',
+                        'hotel_id': '',
+                        'name': '',
+                        'platform': ''
+                    })
+                    continue
                 
                 # Launch clean page tab context for each query to bypass anti-bot track checks
                 context = browser.new_context(
@@ -105,12 +186,44 @@ class DeepResearchWorker(threading.Thread):
                 })
                 page.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "stylesheet", "font", "media") else route.continue_())
                 
-                search_query = f"{target}"
+                # Get item context for this query
+                item_info = None
+                if self.items_context and orig_idx < len(self.items_context):
+                    item_info = self.items_context[orig_idx]
+                
+                search_query = target
+                
+                target_lat_val = None
+                target_lng_val = None
+                if item_info:
+                    try:
+                        lat_str = str(item_info.get('latitude', '')).strip()
+                        lng_str = str(item_info.get('longitude', '')).strip()
+                        if lat_str and lng_str:
+                            target_lat_val = float(lat_str)
+                            target_lng_val = float(lng_str)
+                    except ValueError:
+                        pass
+                
+                # Inject city and country for India restriction
+                if item_info and item_info.get('city'):
+                    city_str = item_info.get('city')
+                    if city_str.lower() not in search_query.lower():
+                        search_query += f" {city_str}"
+                
+                if "india" not in search_query.lower():
+                    search_query += " India"
+                
+                # Help parallel search with coordinates
+                if self.find_parallel and target_lat_val and target_lng_val:
+                    search_query += f" {target_lat_val} {target_lng_val}"
+
+                
                 if self.platform_filter:
                     if self.platform_filter == 'mmt':
                         search_query += " site:makemytrip.com/hotels/"
                     elif self.platform_filter == 'booking':
-                        search_query += " site:booking.com/hotel/"
+                        search_query += " site:booking.com/hotel/in/"
                     elif self.platform_filter == 'agoda':
                         search_query += " site:agoda.com/"
                     elif self.platform_filter == 'goibibo':
@@ -118,19 +231,31 @@ class DeepResearchWorker(threading.Thread):
                     elif self.platform_filter == 'expedia':
                         search_query += " site:expedia.com/"
                         
-                self.signals.log.emit(f"[{i}/{len(valid_queries)}] 🔍 Searching Index for: '{target[:30]}'...")
+                self.signals.log.emit(f"[{step_num}/{len(valid_queries)}] 🔍 Searching Index for: '{target[:30]}'...")
                 
                 target_link = None
                 links = []
                 
+                # Fast path: Construct direct URLs from IDs if available
+                if item_info:
+                    bcom_id = item_info.get('bcom_id', '').strip()
+                    mmt_id = item_info.get('mmt_id', '').strip()
+                    if bcom_id and (not self.platform_filter or self.platform_filter == 'booking' or self.platform_filter == 'any'):
+                        direct_url = f"https://www.booking.com/hotel/in/{bcom_id}.html"
+                        links.append({'href': direct_url, 'text': 'Direct B.com ID Link'})
+                    if mmt_id and (not self.platform_filter or self.platform_filter == 'mmt' or self.platform_filter == 'any'):
+                        direct_url = f"https://www.makemytrip.com/hotels/hotel-details/?hotelId={mmt_id}"
+                        links.append({'href': direct_url, 'text': 'Direct MMT ID Link'})
+                
                 # 1. Yahoo (Fastest, High Resilience)
-                try:
-                    yahoo_url = f"https://search.yahoo.com/search?q={search_query.replace(' ', '+')}"
-                    page.goto(yahoo_url, timeout=12000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(2000)
-                    links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
-                except Exception:
-                    pass
+                if not links:
+                    try:
+                        yahoo_url = f"https://search.yahoo.com/search?q={search_query.replace(' ', '+')}"
+                        page.goto(yahoo_url, timeout=12000, wait_until="domcontentloaded")
+                        page.wait_for_timeout(2000)
+                        links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
+                    except Exception:
+                        pass
 
                 # 2. Bing
                 if not links:
@@ -167,7 +292,7 @@ class DeepResearchWorker(threading.Thread):
                         pass
 
                 domains = {
-                    'booking': 'booking.com/hotel/',
+                    'booking': 'booking.com/hotel/in/',
                     'mmt': 'makemytrip.com/hotels/',
                     'goibibo': 'goibibo.com/hotels/',
                     'agoda': 'agoda.com/',
@@ -175,7 +300,7 @@ class DeepResearchWorker(threading.Thread):
                 }
                 
                 domains_patterns = {
-                    'booking': ['booking.com/hotel/'],
+                    'booking': ['booking.com/hotel/in/'],
                     'mmt': ['makemytrip.com/hotels/', 'makemytrip.com/hotels-international/'],
                     'goibibo': ['goibibo.com/hotels/'],
                     'agoda': ['agoda.com/'],
@@ -235,17 +360,27 @@ class DeepResearchWorker(threading.Thread):
                         if not any(x in decoded_href.lower() for x in exclude_domains):
                             filtered_candidates.append((orig_href, decoded_href, None))
 
+                matched_listings = []
+
                 for orig_href, decoded_href, expected_plat in filtered_candidates:
                     self.signals.log.emit(f"  🔗 Resolving redirect for: {decoded_href[:60]}...")
                     resolved_url = decoded_href
                     try:
-                        page.goto(decoded_href, timeout=25000, wait_until="domcontentloaded")
+                        page.goto(decoded_href, timeout=25000, wait_until="load")
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=5000)
+                        except:
+                            pass
                         resolved_url = page.url
                     except Exception as e:
                         self.signals.log.emit(f"  ⚠️ Redirect resolution page.goto failed: {e}")
                         if orig_href != decoded_href:
                             try:
-                                page.goto(orig_href, timeout=25000, wait_until="domcontentloaded")
+                                page.goto(orig_href, timeout=25000, wait_until="load")
+                                try:
+                                    page.wait_for_load_state("networkidle", timeout=5000)
+                                except:
+                                    pass
                                 resolved_url = page.url
                             except Exception as e2:
                                 self.signals.log.emit(f"  ⚠️ Redirect resolution orig_href page.goto failed: {e2}")
@@ -264,25 +399,175 @@ class DeepResearchWorker(threading.Thread):
                     
                     # Enforce platform filter on final resolved URL
                     if self.platform_filter and self.platform_filter != 'any':
-                        if final_plat == self.platform_filter:
-                            target_link = resolved_url
-                            break
+                        if final_plat != self.platform_filter:
+                            continue
                     else:
-                        if final_plat:
-                            target_link = resolved_url
-                            break
+                        if not final_plat:
+                            continue
 
-                if target_link:
-                    detected = detect_input_type(target_link)
-                    plat = detected.get('platform')
-                    hid = detected.get('hotel_id', '')
+                    # ── COORDINATE VERDICT ──
+                    coord_passed = None
+                    if target_lat_val is not None and target_lng_val is not None:
+                        try:
+                            page.evaluate("window.scrollBy(0, 400)")
+                            page.wait_for_timeout(1000)
+                        except:
+                            pass
+                        cand_lat, cand_lng = extract_coordinates(page)
+                        if cand_lat is not None and cand_lng is not None:
+                            dist_km = get_distance_km(target_lat_val, target_lng_val, cand_lat, cand_lng)
+                            if dist_km is not None:
+                                self.signals.log.emit(f"    📍 Candidate Coordinates: ({cand_lat}, {cand_lng}) -> Distance: {dist_km:.2f} km")
+                                if dist_km <= 3.0:
+                                    self.signals.log.emit(f"    ✅ Coordinate Verification Passed ({dist_km:.2f} km <= 3.0 km)")
+                                    coord_passed = True
+                                else:
+                                    self.signals.log.emit(f"    ❌ Coordinate Verification Failed ({dist_km:.2f} km > 3.0 km)")
+                                    coord_passed = False
+                            else:
+                                coord_passed = None
+                        else:
+                            self.signals.log.emit("    ⚠️ Candidate page coordinates could not be extracted.")
+                            coord_passed = None
+
+                    if coord_passed is False:
+                        continue
+
+                    # --- AI VERIFICATION STEP ---
+                    verification_passed = None
+                    import os
+                    api_key = os.environ.get("GEMINI_API_KEY")
                     
+                    if api_key or True: # Force enter block even if no api key so we check Ollama
+                        self.signals.log.emit(f"  🧠 AI Verification active for: {resolved_url[:60]}...")
+                        page_title = ""
+                        try:
+                            page_title = page.title()
+                        except:
+                            pass
+                        
+                        if item_info:
+                            try:
+                                prompt = f"""
+                                You are an expert Hotel verifier. 
+                                Verify if the target hotel matches the Web search result PERFECTLY.
+                                
+                                CRITERIA:
+                                - Hotel Name Match: Must be fundamentally the same hotel.
+                                - City Match: Must be in the exact same city.
+                                - Pincode Match: If a zipcode is present in BOTH the target and the result, they MUST match.
+                                - Image Match / Branding: The result must represent the true brand of the hotel.
+                                
+                                TARGET HOTEL:
+                                - Name: {item_info.get('name', 'N/A')}
+                                - City: {item_info.get('city', 'N/A')}
+                                - Address: {item_info.get('address', 'N/A')}
+                                - Zipcode: {item_info.get('zipcode', 'N/A')}
+                                
+                                CANDIDATE LISTING:
+                                - URL: {resolved_url}
+                                - Page Title: {page_title if 'page_title' in locals() else 'N/A'}
+                                
+                                Is this candidate URL highly likely to be the correct, dedicated listing page for this specific target hotel?
+                                If city mismatches, name is a different branch, or it's an index/list page, reply NO. 
+                                If it's a perfect match for the specific hotel listing, reply YES.
+                                ONLY reply with YES or NO.
+                                """
+                                
+                                # 1. Try Ollama first
+                                ollama_model = None
+                                try:
+                                    import urllib.request, json
+                                    req = urllib.request.Request("http://localhost:11434/api/tags")
+                                    with urllib.request.urlopen(req, timeout=2) as response:
+                                        data = json.loads(response.read().decode())
+                                        if data.get("models"):
+                                            models = [m["name"] for m in data["models"]]
+                                            nemotron = next((m for m in models if "nemotron-ultra" in m.lower() or "nemotron" in m.lower()), None)
+                                            ollama_model = nemotron if nemotron else "nemotron-ultra:latest"
+                                        else:
+                                            ollama_model = "nemotron-ultra:latest"
+                                except Exception:
+                                    pass
+                                
+                                ai_reply = None
+                                if ollama_model:
+                                    self.signals.log.emit(f"  🧠 AI Verification using local Ollama ({ollama_model})...")
+                                    req_data = json.dumps({
+                                        "model": ollama_model,
+                                        "prompt": prompt,
+                                        "stream": False
+                                    }).encode('utf-8')
+                                    req = urllib.request.Request("http://localhost:11434/api/generate", data=req_data, headers={'Content-Type': 'application/json'})
+                                    with urllib.request.urlopen(req, timeout=10) as response:
+                                        res_data = json.loads(response.read().decode())
+                                        ai_reply = res_data.get("response", "").strip().upper()
+                                
+                                # 2. Fallback to Gemini if API key is provided and Ollama is not available
+                                elif api_key:
+                                    import google.generativeai as genai
+                                    genai.configure(api_key=api_key)
+                                    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                                    target_model = "gemini-1.5-flash"
+                                    if "models/gemini-1.5-flash" not in available_models and "gemini-1.5-flash" not in available_models:
+                                        if "models/gemini-1.5-flash-latest" in available_models:
+                                            target_model = "gemini-1.5-flash-latest"
+                                        elif "models/gemini-pro" in available_models:
+                                            target_model = "gemini-pro"
+                                        elif "models/gemini-1.0-pro" in available_models:
+                                            target_model = "gemini-1.0-pro"
+                                        elif available_models:
+                                            target_model = available_models[-1].replace("models/", "")
+                                            
+                                    model = genai.GenerativeModel(target_model)
+                                    response = model.generate_content(prompt)
+                                    ai_reply = response.text.strip().upper()
+
+                                if ai_reply:
+                                    if "NO" in ai_reply:
+                                        self.signals.log.emit(f"  ❌ AI Rejected URL: Model determined this is not the right hotel.")
+                                        verification_passed = False
+                                    else:
+                                        self.signals.log.emit(f"  ✅ AI Approved URL.")
+                                        verification_passed = True
+                            except Exception as e:
+                                self.signals.log.emit(f"  ⚠️ AI Verification error: {e}")
+                                verification_passed = None
+
+                    # --- HEURISTIC FALLBACK ---
+                    if verification_passed is None:
+                        self.signals.log.emit(f"  ⚙️ Using Heuristic Verification for: {resolved_url[:60]}...")
+                        verification_passed = True
+                        
+                        if "booking.com" in resolved_url:
+                            if "/hotel/index.html" in resolved_url or "/searchresults" in resolved_url or "/city/" in resolved_url or "/hotel/in/" not in resolved_url:
+                                self.signals.log.emit(f"  ❌ Heuristic Rejected: Generic Booking.com search URL or Non-India URL.")
+                                verification_passed = False
+                            else:
+                                if item_info and item_info.get('name'):
+                                    name = item_info.get('name').lower()
+                                    match = re.search(r'/hotel/[^/]+/([^.]+)', resolved_url)
+                                    if match:
+                                        url_slug = match.group(1).replace('-', ' ')
+                                        words = [w for w in re.split(r'\W+', name) if len(w) > 3]
+                                        if words:
+                                            # If NO words from the hotel name are in the URL slug, reject it
+                                            if not any(w in url_slug for w in words):
+                                                self.signals.log.emit(f"  ❌ Heuristic Rejected: URL slug '{url_slug}' doesn't match hotel '{name}'.")
+                                                verification_passed = False
+
+                    if not verification_passed:
+                        continue
+
                     # ── Extract Hotel ID for MakeMyTrip (MMT) ──
+                    detected = detect_input_type(resolved_url)
+                    plat = detected.get('platform') if detected else final_plat
+                    hid = detected.get('hotel_id', '') if detected else ''
+                    
                     if plat == 'mmt' and not hid and self.deep_extract:
                         self.signals.log.emit("  🕵️ Deep extracting MMT Hotel ID...")
-                        # First, try to get hotel_id from URL query parameters (case-insensitive)
                         try:
-                            url_parts = urlparse(target_link)
+                            url_parts = urlparse(resolved_url)
                             query = parse_qs(url_parts.query)
                             query_lower = {k.lower(): v for k, v in query.items()}
                             if 'hotelid' in query_lower:
@@ -293,7 +578,7 @@ class DeepResearchWorker(threading.Thread):
                                 self.signals.log.emit(f"  ✓ Found ID in URL query (topHtlId): {hid}")
                         except Exception as e:
                             self.signals.log.emit(f"⚠️ URL query parsing failed: {e}")
-                        # If still not found, fetch page content and search for common patterns
+                        
                         if not hid:
                             try:
                                 if page:
@@ -310,13 +595,10 @@ class DeepResearchWorker(threading.Thread):
                                     except Exception:
                                         pass
                                     
-                                    # 1. Try to evaluate JavaScript to extract ID dynamically
                                     js_eval_code = """() => {
                                         try {
-                                            // Check __INITIAL_STATE__
                                             if (window.__INITIAL_STATE__) {
                                                 const state = window.__INITIAL_STATE__;
-                                                // Direct key checks
                                                 if (state.requestInfo && state.requestInfo.query && state.requestInfo.query.hotelId) {
                                                     return String(state.requestInfo.query.hotelId);
                                                 }
@@ -335,7 +617,6 @@ class DeepResearchWorker(threading.Thread):
                                                 if (state.hotelDetail && state.hotelDetail.hotelid) {
                                                     return String(state.hotelDetail.hotelid);
                                                 }
-                                                
                                                 const findId = (obj) => {
                                                     if (!obj || typeof obj !== 'object') return null;
                                                     if (obj.hotelId) return String(obj.hotelId);
@@ -351,14 +632,12 @@ class DeepResearchWorker(threading.Thread):
                                                 let res = findId(state);
                                                 if (res) return res;
                                             }
-                                            // Check script tags text patterns
                                             const scripts = document.querySelectorAll('script');
                                             for (let script of scripts) {
                                                 let text = script.textContent || '';
                                                 let m = text.match(/"hotelId"\\s*:\\s*"?(\\d+)"?/i) || text.match(/hotelId\\s*=\\s*"?(\\d+)"?/i) || text.match(/"mtxHotelId"\\s*:\\s*"?(\\d+)"?/i);
                                                 if (m) return m[1];
                                             }
-                                            // Meta/link tag canonical url
                                             let meta = document.querySelector('meta[property="og:url"]') || document.querySelector('link[rel="canonical"]');
                                             if (meta) {
                                                 let url = meta.content || meta.href || '';
@@ -368,16 +647,13 @@ class DeepResearchWorker(threading.Thread):
                                         } catch(e) {}
                                         return "";
                                     }"""
-
                                     try:
-                                        # Wait a bit for potential redirects/navigation to settle
                                         page.wait_for_timeout(2000)
                                         evaluated_id = page.evaluate(js_eval_code)
                                         if evaluated_id:
                                             hid = evaluated_id
                                             self.signals.log.emit(f"  ✓ Found ID via page evaluation: {hid}")
                                     except Exception as e:
-                                        # If execution context was destroyed, wait and retry
                                         if "destroyed" in str(e).lower() or "navigation" in str(e).lower():
                                             try:
                                                 page.wait_for_timeout(2500)
@@ -389,65 +665,93 @@ class DeepResearchWorker(threading.Thread):
                                                 self.signals.log.emit(f"⚠️ Page evaluation retry failed: {retry_e}")
                                         else:
                                             self.signals.log.emit(f"⚠️ Page evaluation failed: {e}")
-
+                                    
                                     if not hid:
                                         try:
                                             html = page.content()
                                         except Exception:
                                             page.wait_for_timeout(2000)
                                             html = page.content()
-                                else:
-                                    import urllib.request
-                                    req = urllib.request.Request(target_link, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                                    html = urllib.request.urlopen(req, timeout=5).read().decode('utf-8')
-                                
-                                if not hid:
-                                    # Look for JSON field mtxHotelId or simple hotelId parameter in HTML source
-                                    m = re.search(r'"hotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'"mtxHotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'hotelId\s*=\s*"?(\d+)"?', html) or re.search(r'hotelId(?:["\':\s]*)([a-zA-Z0-9_]+)', html)
-                                    if m:
-                                        hid = m.group(1)
-                                        self.signals.log.emit(f"  ✓ Found ID from page source regex: {hid}")
                             except Exception as e:
                                 self.signals.log.emit(f"⚠️ Deep ID extraction failed: {e}")
+                                
+                        if not hid:
+                            try:
+                                m = re.search(r'"hotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'"mtxHotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'hotelId\s*=\s*"?(\d+)"?', html) or re.search(r'hotelId(?:["\':\s]*)([a-zA-Z0-9_]+)', html)
+                                if m:
+                                    hid = m.group(1)
+                                    self.signals.log.emit(f"  ✓ Found ID from page source regex: {hid}")
+                            except Exception:
+                                pass
 
                     # ── Inject Optimal Future Date (45 days out) ──
                     try:
-                        parsed = urlparse(target_link)
+                        parsed = urlparse(resolved_url)
                         query_params = parse_qs(parsed.query)
-                        
-                        # Strip existing date parameters to prevent conflicts
                         for key in ['checkin', 'checkout', 'checkIn', 'checkOut']:
                             if key in query_params:
                                 del query_params[key]
-                                
                         future_in = datetime.now() + timedelta(days=45)
                         future_out = future_in + timedelta(days=1)
-                        
                         if plat == 'mmt':
                             query_params['checkin'] = [future_in.strftime("%m%d%Y")]
                             query_params['checkout'] = [future_out.strftime("%m%d%Y")]
                         elif plat in ('booking', 'agoda', 'expedia', 'goibibo'):
                             query_params['checkin'] = [future_in.strftime("%Y-%m-%d")]
                             query_params['checkout'] = [future_out.strftime("%Y-%m-%d")]
-                            
-                        # Reconstruct URL
                         new_query = urlencode(query_params, doseq=True)
-                        target_link = urlunparse(parsed._replace(query=new_query))
+                        resolved_url = urlunparse(parsed._replace(query=new_query))
                     except Exception as e:
                         print(f"Date injection failed: {e}")
 
-                    # Combine URL and Hotel ID for the bulk scraper text box
-                    output_link = f"{target_link} | {hid}" if hid else target_link
-
-                    self.signals.log.emit(f"  🎉 Resolved: {target_link[:60]}...")
-                    self.signals.finished.emit({
-                        'url': output_link,
+                    matched_listings.append({
+                        'url': resolved_url,
                         'hotel_id': hid,
                         'name': detected.get('name', target) if detected else target,
                         'platform': plat
                     })
+                    
+                    if not self.find_parallel:
+                        break
+
+                if matched_listings:
+                    if self.find_parallel:
+                        urls = [m['url'] for m in matched_listings]
+                        hids = [m['hotel_id'] for m in matched_listings if m['hotel_id']]
+                        combined_url = "\n".join(urls)
+                        combined_hid = ", ".join(hids)
+                        
+                        self.signals.log.emit(f"  🎉 Resolved {len(matched_listings)} Parallel Listings.")
+                        for m in matched_listings:
+                            self.signals.log.emit(f"    ↳ {m['url'][:60]}...")
+                            
+                        self.signals.finished.emit({
+                            'query_index': orig_idx,
+                            'url': combined_url,
+                            'hotel_id': combined_hid,
+                            'name': matched_listings[0].get('name', target),
+                            'platform': matched_listings[0].get('platform')
+                        })
+                    else:
+                        m = matched_listings[0]
+                        output_link = f"{m['url']} | {m['hotel_id']}" if m['hotel_id'] else m['url']
+                        self.signals.log.emit(f"  🎉 Resolved: {m['url'][:60]}...")
+                        self.signals.finished.emit({
+                            'query_index': orig_idx,
+                            'url': output_link,
+                            'hotel_id': m['hotel_id'],
+                            'name': m['name'],
+                            'platform': m['platform']
+                        })
                 else:
                     self.signals.log.emit(f"  ❌ Failed to resolve footprint for '{target}'.")
+                    self.signals.finished.emit({
+                        'query_index': orig_idx,
+                        'url': '',
+                        'hotel_id': '',
+                        'name': target,
+                        'platform': ''
+                    })
                 
                 try:
                     ctx = page.context
@@ -611,12 +915,76 @@ class AgentReasoningWorker(threading.Thread):
                     except: pass
             return
 
-        # General fallback
-        self.signals.finished.emit(
-            f"🤖 **Antigravity Agent (Gemini Core)**:\n"
-            f"I processed your query: *\"{self.query}\"*.\n\n"
-            f"If you want to know about a hotel's ratings or live status, ask me explicitly! (e.g., 'How many reviews does Hotel XYZ have?'). Or click **🔍 Deep Research** to inject its link directly to the scraper queue."
-        )
+        # General fallback -> Try Ollama/Gemini first!
+        import os
+        api_key = os.environ.get("GEMINI_API_KEY")
+        
+        # 1. Try Ollama first
+        ollama_model = None
+        try:
+            import urllib.request, json
+            req = urllib.request.Request("http://localhost:11434/api/tags")
+            with urllib.request.urlopen(req, timeout=1.5) as response:
+                data = json.loads(response.read().decode())
+                if data.get("models"):
+                    models = [m["name"] for m in data["models"]]
+                    nemotron = next((m for m in models if "nemotron-ultra" in m.lower() or "nemotron" in m.lower()), None)
+                    ollama_model = nemotron if nemotron else models[0]
+        except Exception:
+            pass
+            
+        ai_reply = None
+        system_prompt = "You are Antigravity, a helpful assistant built into a Hotel Ratings Scraper application. Keep responses concise and focused on helping the user scrape hotel ratings, reviews, manage listing links, or general assistance."
+        prompt = f"User asks: {self.query}"
+        
+        if ollama_model:
+            try:
+                self.signals.log.emit(f"🧠 Querying local Ollama ({ollama_model})...")
+                req_data = json.dumps({
+                    "model": ollama_model,
+                    "prompt": f"{system_prompt}\n\n{prompt}",
+                    "stream": False
+                }).encode('utf-8')
+                req = urllib.request.Request("http://localhost:11434/api/generate", data=req_data, headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    res_data = json.loads(response.read().decode())
+                    ai_reply = res_data.get("response", "").strip()
+            except Exception as e:
+                self.signals.log.emit(f"⚠️ Ollama query failed: {e}")
+                
+        elif api_key:
+            try:
+                self.signals.log.emit(f"🧠 Querying Gemini Core...")
+                import google.generativeai as genai
+                genai.configure(api_key=api_key)
+                
+                # Check models dynamically
+                available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                target_model = "gemini-1.5-flash"
+                if "models/gemini-1.5-flash" not in available_models and "gemini-1.5-flash" not in available_models:
+                    if "models/gemini-1.5-flash-latest" in available_models:
+                        target_model = "gemini-1.5-flash-latest"
+                    elif "models/gemini-pro" in available_models:
+                        target_model = "gemini-pro"
+                    elif available_models:
+                        target_model = available_models[-1].replace("models/", "")
+                
+                model = genai.GenerativeModel(target_model, system_instruction=system_prompt)
+                response = model.generate_content(prompt)
+                ai_reply = response.text.strip()
+            except Exception as e:
+                self.signals.log.emit(f"⚠️ Gemini query failed: {e}")
+
+        if ai_reply:
+            self.signals.finished.emit(f"🤖 **Antigravity AI Agent**:\n{ai_reply}")
+        else:
+            self.signals.finished.emit(
+                f"🤖 **Antigravity Agent (Offline fallback)**:\n"
+                f"I processed your query: *\"{self.query}\"*.\n\n"
+                f"I could not connect to a local Ollama server or Gemini API to generate a response. "
+                f"Please ensure Ollama is running (`ollama serve`) or configure your `GEMINI_API_KEY` to talk to me! "
+                f"You can also click **🔍 Deep Research** to search listings for this hotel."
+            )
 
 # ── Floating Glassmorphic AI Chat Agent Widget ──────────────────────
 
@@ -629,7 +997,15 @@ class FloatingAgentWidget(QWidget):
         self.drag_pos = QPoint()
         self._active_reasoning_workers = []
         self._setup_ui()
-        self.resize(320, 420)
+        
+        # Start minimized by default
+        self.chat_display.setVisible(False)
+        self.input_field.setVisible(False)
+        self.ask_btn.setVisible(False)
+        self.research_btn.setVisible(False)
+        self.min_btn.setText("▲")
+        self.title_lbl.setText("🤖 Antigravity Agent")
+        self.resize(180, 42)
         
         # Futuristic visual styling: Dark Glassmorphic with Neon Border
         self.setStyleSheet("""
@@ -686,21 +1062,18 @@ class FloatingAgentWidget(QWidget):
         self.container_layout.addWidget(main_frame)
 
         layout = QVBoxLayout(main_frame)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(12, 10, 12, 10)
 
         # Title / Handle bar
         title_row = QHBoxLayout()
-        avatar = QLabel("🤖")
-        avatar.setFont(QFont("Segoe UI", 16))
-        title_row.addWidget(avatar)
-
-        self.title_lbl = QLabel(f"Antigravity Agent ({self.default_context})")
+        
+        self.title_lbl = QLabel("🤖 Antigravity Agent")
         self.title_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self.title_lbl.setStyleSheet("color: #e94560;")
         title_row.addWidget(self.title_lbl)
         
         # Minimize button
-        self.min_btn = QPushButton("—")
+        self.min_btn = QPushButton("▲")
         self.min_btn.setMaximumWidth(26)
         self.min_btn.setStyleSheet("background-color: #333; padding: 2px;")
         self.min_btn.clicked.connect(self.toggle_size)
@@ -742,15 +1115,23 @@ class FloatingAgentWidget(QWidget):
             self.input_field.setVisible(False)
             self.ask_btn.setVisible(False)
             self.research_btn.setVisible(False)
-            self.min_btn.setText("❑")
-            self.resize(320, 50)
+            self.min_btn.setText("▲")
+            self.title_lbl.setText("🤖 Antigravity Agent")
+            self.resize(180, 42)
         else:
             self.chat_display.setVisible(True)
             self.input_field.setVisible(True)
             self.ask_btn.setVisible(True)
             self.research_btn.setVisible(True)
             self.min_btn.setText("—")
+            self.title_lbl.setText(f"Antigravity Agent ({self.default_context})")
             self.resize(320, 420)
+            
+        if self.parent():
+            margin = 30
+            pw = self.parent().width()
+            ph = self.parent().height()
+            self.move(pw - self.width() - margin, ph - self.height() - margin)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -799,6 +1180,10 @@ class FloatingAgentWidget(QWidget):
         worker.start()
 
     def on_research_finished(self, result):
+        if not isinstance(result, dict):
+            self.chat_display.append(f"\n🎉 Research finished:\n{result}")
+            return
+            
         if 'error' in result:
             self.chat_display.append(f"\n❌ Research Finished with error: {result['error']}")
             return
@@ -806,10 +1191,10 @@ class FloatingAgentWidget(QWidget):
         # Feed back directly to the active scraping queue
         self.chat_display.append(
             f"\n🎉 Research complete!\n"
-            f"  Name: {result['name']}\n"
-            f"  URL: {result['url'][:60]}\n"
-            f"  ID: {result['hotel_id'] or 'N/A'}\n"
-            f"  Platform: {result['platform']}"
+            f"  Name: {result.get('name', 'N/A')}\n"
+            f"  URL: {result.get('url', '')[:60]}\n"
+            f"  ID: {result.get('hotel_id') or 'N/A'}\n"
+            f"  Platform: {result.get('platform', 'N/A')}"
         )
         
         # Locate RatingsTab parent and insert resolved listing item

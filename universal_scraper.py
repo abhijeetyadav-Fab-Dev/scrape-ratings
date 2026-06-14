@@ -7,9 +7,9 @@ multiple hotel extranet sources (Booking.com, MMT, etc.).
 
 Architecture:
   Source Plugin (defines available fields & login/extract logic)
-  → ScrapeJob (config: which source + which fields)
-  → ScrapeJobRunner (executes the job via Playwright)
-  → CSV output
+  -> ScrapeJob (config: which source + which fields)
+  -> ScrapeJobRunner (executes the job via Playwright)
+  -> CSV output
 
 How to add a new source:
   1. Subclass ExtranetSource
@@ -64,7 +64,7 @@ def clean_row_keys(row: dict) -> dict:
         "mmt_", "goi_", "agd_", "exp_", "htl_", "promo_mmt_"
     ]
     for k, v in row.items():
-        if k in ["hotel_id", "hotel_name", "_source", "_error"]:
+        if k in ["hotel_id", "hotel_name", "sub_tab", "_source", "_error"]:
             cleaned[k] = v
             continue
         cleaned_key = k
@@ -82,6 +82,9 @@ def clean_row_keys(row: dict) -> dict:
 
 class ExtranetSource(ABC):
     """Override these to define a new extranet data source."""
+
+    source_key = ""
+
 
     @property
     @abstractmethod
@@ -169,7 +172,7 @@ class ExtranetSource(ABC):
                     all_keys = set()
                     for r in cleaned_rows:
                         all_keys.update(r.keys())
-                    for k in ["hotel_id", "hotel_name", "_source", "_error"]:
+                    for k in ["hotel_id", "hotel_name", "sub_tab", "_source", "_error"]:
                         all_keys.discard(k)
                     field_keys = sorted(list(all_keys))
 
@@ -178,7 +181,7 @@ class ExtranetSource(ABC):
                 for k in field_keys:
                     if k not in o_keys:
                         o_keys.append(k)
-                for k in ["hotel_id", "hotel_name", "_source", "_error"]:
+                for k in ["hotel_id", "hotel_name", "sub_tab", "_source", "_error"]:
                     if k not in o_keys:
                         o_keys.append(k)
 
@@ -262,7 +265,7 @@ class ExtranetSource(ABC):
     def _extract_table_fields(self, page, field_keys: list[str],
                                known_columns: dict[str, str] = None) -> list[dict]:
         """Extract fields from data tables with column header matching.
-        known_columns maps lowercase column header patterns → field keys.
+        known_columns maps lowercase column header patterns -> field keys.
         """
         # First, check if the page is an error page
         is_error, error_context = self._is_error_page(page)
@@ -305,7 +308,7 @@ class ExtranetSource(ABC):
     def _extract_card_fields(self, page, field_keys: list[str],
                               card_selector: str, field_mappings: dict[str, str]) -> list[dict]:
         """Parse repeated card elements with child selectors per field.
-        field_mappings: field_key → CSS selector relative to each card.
+        field_mappings: field_key -> CSS selector relative to each card.
         """
         rows = []
         try:
@@ -330,7 +333,7 @@ class ExtranetSource(ABC):
                                label_map: dict[str, str],
                                card_selector: str = "") -> list[dict]:
         """Parse metric/KPI cards to extract value-label pairs.
-        label_map: keyword in card text → field key.
+        label_map: keyword in card text -> field key.
         """
         rows = []
         row = {}
@@ -390,7 +393,7 @@ class ExtranetSource(ABC):
         return False, ""
 
     def _generic_fallback(self, page) -> list[dict]:
-        """Final fallback: try tables → list items → body text.
+        """Final fallback: try tables -> list items -> body text.
         Checks for error pages first and returns meaningful context instead of raw error text."""
         # First, check if the page is an error page
         is_error, error_context = self._is_error_page(page)
@@ -443,6 +446,62 @@ class ExtranetSource(ABC):
                 pass
         return rows
 
+    def _navigate_to_sub_tab(self, page, label: str) -> bool:
+        """Find and click the sub-tab link or menu item matching the label text."""
+        try:
+            page.wait_for_timeout(1500) # let page settle
+            
+            # Lowercase label for matching
+            lower_label = label.lower().strip()
+            
+            # Let's search and click using JS evaluate to handle shadow DOM, icons, and hidden elements
+            clicked = page.evaluate("""(labelText) => {
+                const lower = labelText.toLowerCase().trim();
+                
+                // Helper to score how well an element matches the label
+                function getMatchScore(el) {
+                    const text = el.textContent.toLowerCase().trim();
+                    if (text === lower) return 3; // exact match
+                    if (text.includes(lower)) {
+                        // If it's a menu item or link, higher score
+                        const tag = el.tagName.toLowerCase();
+                        if (tag === 'a' || tag === 'button' || el.getAttribute('role') === 'tab' || el.classList.contains('bui-tab__link')) {
+                            return 2;
+                        }
+                        return 1;
+                    }
+                    return 0;
+                }
+                
+                let bestElement = null;
+                let bestScore = 0;
+                
+                const candidates = document.querySelectorAll('a, button, li, [role="tab"], .bui-tab__link, span, div');
+                for (const el of candidates) {
+                    // Filter out elements that are not visible or too small
+                    if (el.offsetWidth === 0 && el.offsetHeight === 0) continue;
+                    
+                    const score = getMatchScore(el);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestElement = el;
+                    }
+                }
+                
+                if (bestElement && bestScore >= 2) {
+                    bestElement.click();
+                    return true;
+                }
+                return false;
+            }""", label)
+            
+            if clicked:
+                page.wait_for_timeout(2000) # Wait for page load/settle
+                return True
+        except Exception:
+            pass
+        return False
+
 
 # ────────────────────────────────────────────────────────────
 #  Booking.com Extranet Source
@@ -452,6 +511,79 @@ class BookingExtranetSource(ExtranetSource):
     source_name = "Booking.com Extranet"
     login_url = "https://admin.booking.com/"
 
+    SUB_TAB_FIELDS = {
+        "dash_home", "rate_calendar", "rate_open_close", "rate_copy_future", "rate_plans", 
+        "rate_value_adds", "rate_connectivity_errors", "rate_country_rates", "rate_mobile_rates",
+        "promo_choose_new", "promo_simulate_max", "promo_active", "res_list", "prop_page_score", 
+        "prop_general_info", "prop_vat_tax", "prop_photos", "prop_policies", "prop_res_policies", 
+        "prop_facilities", "prop_room_details", "prop_room_amenities", "prop_descriptions", 
+        "prop_messaging", "prop_sustainability", "boost_opportunity_center", "boost_genius_program", 
+        "boost_preferred_program", "boost_long_stays", "boost_visibility_booster", "boost_smart_flex", 
+        "boost_sponsored_listings", "inb_reservation_messages", "inb_booking_messages", 
+        "inb_guest_qa", "rev_guest_reviews", "rev_guest_experience", "fin_payout_info", 
+        "fin_invoices_docs", "fin_res_statement", "fin_overview", "fin_help", "fin_settings", 
+        "anl_dashboard", "anl_demand", "anl_pace", "anl_sales_stats", "anl_booker_insights", 
+        "anl_book_window", "anl_cancellation_char", "anl_comparable", "anl_genius_report", 
+        "anl_ranking", "anl_performance"
+    }
+
+    SUB_TAB_URLS = {
+        "dash_home": "home.html",
+        "rate_calendar": "rates_availability.html",
+        "rate_open_close": "rates_availability.html",
+        "rate_copy_future": "rates_availability.html",
+        "rate_plans": "rate_plans.html",
+        "rate_value_adds": "value_adds.html",
+        "rate_connectivity_errors": "connectivity_errors.html",
+        "rate_country_rates": "country_rates.html",
+        "rate_mobile_rates": "mobile_rates.html",
+        "promo_choose_new": "promotions/list.html",
+        "promo_simulate_max": "promotions/list.html",
+        "promo_active": "promotions/list.html",
+        "res_list": "search_reservations.html",
+        "prop_page_score": "content_score.html",
+        "prop_general_info": "contacts.html",
+        "prop_vat_tax": "vat_tax.html",
+        "prop_photos": "photos.html",
+        "prop_policies": "policies.html",
+        "prop_res_policies": "reservation_policies.html",
+        "prop_facilities": "facilities.html",
+        "prop_room_details": "room_details.html",
+        "prop_room_amenities": "room_amenities.html",
+        "prop_descriptions": "descriptions.html",
+        "prop_messaging": "messaging_settings.html",
+        "prop_sustainability": "sustainability.html",
+        "boost_opportunity_center": "opportunities.html",
+        "boost_genius_program": "genius.html",
+        "boost_preferred_program": "preferred.html",
+        "boost_long_stays": "long_stays.html",
+        "boost_visibility_booster": "visibility_booster.html",
+        "boost_smart_flex": "smart_flex.html",
+        "boost_sponsored_listings": "sponsored_listings.html",
+        "inb_reservation_messages": "messaging/inbox.html",
+        "inb_booking_messages": "messaging/inbox.html",
+        "inb_guest_qa": "messaging/inbox.html",
+        "rev_guest_reviews": "reviews.html",
+        "rev_guest_experience": "reviews.html",
+        "fin_payout_info": "finance_payout.html",
+        "fin_invoices_docs": "finance_invoices.html",
+        "fin_res_statement": "finance_reservations.html",
+        "fin_overview": "finance_overview.html",
+        "fin_help": "finance_help.html",
+        "fin_settings": "finance_settings.html",
+        "anl_dashboard": "statistics/index.html",
+        "anl_demand": "statistics/demand.html",
+        "anl_pace": "statistics/pace.html",
+        "anl_sales_stats": "statistics/sales.html",
+        "anl_booker_insights": "statistics/booker_insights.html",
+        "anl_book_window": "statistics/book_window.html",
+        "anl_cancellation_char": "statistics/cancellation_char.html",
+        "anl_comparable": "statistics/comparable.html",
+        "anl_genius_report": "statistics/genius_report.html",
+        "anl_ranking": "statistics/ranking.html",
+        "anl_performance": "statistics/index.html",
+    }
+
     @property
     def cookies_path(self):
         return BOOKING_EXTRANET_COOKIES
@@ -460,154 +592,182 @@ class BookingExtranetSource(ExtranetSource):
     def available_fields(self):
         return [
             {
-                "group": "Dashboard / Home",
+                "group": "Home",
                 "section": "dashboard",
                 "fields": [
-                    {"key": "dash_occupancy",        "label": "Occupancy Rate"},
-                    {"key": "dash_revenue_ytd",      "label": "Revenue YTD"},
-                    {"key": "dash_avg_daily_rate",   "label": "Average Daily Rate (ADR)"},
-                    {"key": "dash_revpar",           "label": "RevPAR"},
-                    {"key": "dash_bookings_today",   "label": "Bookings Today"},
-                    {"key": "dash_check_ins_today",  "label": "Check-ins Today"},
+                    {"key": "dash_home", "label": "Home Dashboard (Sub-Tab)"},
+                    {"key": "dash_occupancy", "label": "Occupancy"},
+                    {"key": "dash_revenue_ytd", "label": "Revenue YTD"},
+                    {"key": "dash_avg_daily_rate", "label": "Average Daily Rate"},
+                    {"key": "dash_revpar", "label": "RevPAR"},
+                    {"key": "dash_bookings_today", "label": "Bookings Today"},
+                    {"key": "dash_check_ins_today", "label": "Check-ins Today"},
                     {"key": "dash_check_outs_today", "label": "Check-outs Today"},
-                    {"key": "dash_net_revenue",      "label": "Net Revenue"},
+                    {"key": "dash_net_revenue", "label": "Net Revenue"},
                     {"key": "dash_commission_total", "label": "Total Commission"},
+                ]
+            },
+            {
+                "group": "Rates & availability",
+                "section": "rates",
+                "fields": [
+                    {"key": "rate_calendar", "label": "Calendar (Sub-Tab)"},
+                    {"key": "rate_open_close", "label": "Open/close rooms (Sub-Tab)"},
+                    {"key": "rate_copy_future", "label": "Copy rates to future dates (Sub-Tab)"},
+                    {"key": "rate_plans", "label": "Rate plans (Sub-Tab)"},
+                    {"key": "rate_value_adds", "label": "Value adds (Sub-Tab)"},
+                    {"key": "rate_connectivity_errors", "label": "Connectivity errors (Sub-Tab)"},
+                    {"key": "rate_country_rates", "label": "Country rates (Sub-Tab)"},
+                    {"key": "rate_mobile_rates", "label": "Mobile rates (Sub-Tab)"},
+                ]
+            },
+            {
+                "group": "Promotions",
+                "section": "promotions",
+                "fields": [
+                    {"key": "promo_choose_new", "label": "Choose new promotion (Sub-Tab)"},
+                    {"key": "promo_simulate_max", "label": "Simulate max discount (Sub-Tab)"},
+                    {"key": "promo_active", "label": "Your active promotions (Sub-Tab)"},
+                    {"key": "promo_Name", "label": "Offer Name"},
+                    {"key": "promo_Discount", "label": "Discount % / Amount"},
+                    {"key": "promo_Bookable_period", "label": "Valid From"},
+                    {"key": "promo_Stay_dates", "label": "Valid To"},
+                    {"key": "promo_Bookings", "label": "Bookings"},
+                    {"key": "promo_Room_nights", "label": "Room Nights"},
+                    {"key": "promo_Average_daily_rate", "label": "Average Daily Rate"},
+                    {"key": "promo_Revenue", "label": "Revenue"},
+                    {"key": "promo_Cancelled_room_nights", "label": "Cancelled Nights"},
+                    {"key": "promo_Status", "label": "Status"},
                 ]
             },
             {
                 "group": "Reservations",
                 "section": "reservations",
                 "fields": [
-                    {"key": "res_guest_name",     "label": "Guest Name"},
-                    {"key": "res_check_in",       "label": "Check-in Date"},
-                    {"key": "res_check_out",      "label": "Check-out Date"},
-                    {"key": "res_booked_date",     "label": "Booking Date"},
-                    {"key": "res_number_of_guests","label": "Number of guests"},
-                    {"key": "res_room_type",      "label": "Room Type"},
-                    {"key": "res_status",         "label": "Booking Status"},
-                    {"key": "res_total_price",    "label": "Total Price"},
-                    {"key": "res_commission",     "label": "Commission"},
-                    {"key": "res_balance",        "label": "Balance Due"},
-                    {"key": "res_booking_id",     "label": "Booking ID / Confirmation"},
+                    {"key": "res_list", "label": "Reservations list (Sub-Tab)"},
+                    {"key": "res_guest_name", "label": "Guest Name"},
+                    {"key": "res_check_in", "label": "Check-in Date"},
+                    {"key": "res_check_out", "label": "Check-out Date"},
+                    {"key": "res_room_type", "label": "Room Type"},
+                    {"key": "res_status", "label": "Booking Status"},
+                    {"key": "res_rate_plan", "label": "Rate Plan"},
                 ]
             },
             {
-                "group": "Rates & Availability",
-                "section": "rates",
-                "fields": [
-                    {"key": "rate_plan_name",       "label": "Rate Plan Name"},
-                    {"key": "rate_plan_price",      "label": "Rate Plan Price"},
-                    {"key": "rate_room_type",       "label": "Room Type"},
-                    {"key": "rate_availability",    "label": "Available Rooms"},
-                    {"key": "rate_allotment",       "label": "Allotment"},
-                    {"key": "rate_booked",          "label": "Booked Rooms"},
-                    {"key": "rate_los_min",         "label": "Min Length of Stay"},
-                    {"key": "rate_los_max",         "label": "Max Length of Stay"},
-                    {"key": "rate_restrictions",    "label": "Restrictions (CTA, closed-to-arrival)"},
-                    {"key": "rate_meal_plan",       "label": "Meal Plan Included"},
-                    {"key": "rate_cancel_policy",   "label": "Cancellation Policy"},
-                ]
-            },
-            {
-                "group": "Property Details",
+                "group": "Property",
                 "section": "property",
                 "fields": [
-                    {"key": "prop_name",          "label": "Property Name"},
-                    {"key": "prop_description",   "label": "Description"},
-                    {"key": "prop_amenities",     "label": "Amenities"},
-                    {"key": "prop_room_types",    "label": "Room Types"},
-                    {"key": "prop_policies",      "label": "Policies"},
-                    {"key": "prop_photos",        "label": "Photo URLs"},
-                    {"key": "prop_facilities",    "label": "Facilities & Services"},
-                    {"key": "prop_house_rules",   "label": "House Rules"},
+                    {"key": "prop_page_score", "label": "Property Page Score (Sub-Tab)"},
+                    {"key": "prop_general_info", "label": "General info & property status (Sub-Tab)"},
+                    {"key": "prop_vat_tax", "label": "VAT/Tax/Charges (Sub-Tab)"},
+                    {"key": "prop_photos", "label": "Photos (Sub-Tab)"},
+                    {"key": "prop_policies", "label": "Property policies (Sub-Tab)"},
+                    {"key": "prop_res_policies", "label": "Reservation policies (Sub-Tab)"},
+                    {"key": "prop_facilities", "label": "Facilities & services (Sub-Tab)"},
+                    {"key": "prop_room_details", "label": "Room details (Sub-Tab)"},
+                    {"key": "prop_room_amenities", "label": "Room amenities (Sub-Tab)"},
+                    {"key": "prop_descriptions", "label": "View Your Descriptions (Sub-Tab)"},
+                    {"key": "prop_messaging", "label": "Messaging Preferences (Sub-Tab)"},
+                    {"key": "prop_sustainability", "label": "Sustainability (Sub-Tab)"},
+                    {"key": "prop_name", "label": "Property Name"},
+                    {"key": "prop_description", "label": "Description"},
+                    {"key": "prop_amenities", "label": "Amenities"},
+                    {"key": "prop_room_types", "label": "Room Types"},
+                    {"key": "prop_facilities_data", "label": "Facilities"},
+                    {"key": "prop_policies_data", "label": "Policies"},
+                    {"key": "prop_house_rules", "label": "House Rules"},
+                    {"key": "prop_photos_data", "label": "Photos"},
                 ]
             },
             {
-                "group": "Boost Performance",
+                "group": "Boost performance",
                 "section": "boost",
                 "fields": [
-                    {"key": "boost_visibility_score",  "label": "Visibility Score"},
-                    {"key": "boost_preferred_status",  "label": "Preferred Partner Status"},
-                    {"key": "boost_genius_tier",       "label": "Genius Tier"},
-                    {"key": "boost_conversion_rate",   "label": "Conversion Rate"},
-                    {"key": "boost_competitor_rank",   "label": "Competitor Rank"},
-                    {"key": "boost_search_views",      "label": "Search Results Views"},
-                    {"key": "boost_property_views",    "label": "Property Page Views"},
-                    {"key": "boost_bookings",          "label": "Bookings Received"},
-                    {"key": "boost_cancellations",     "label": "Cancellations"},
+                    {"key": "boost_opportunity_center", "label": "Opportunity Center (Sub-Tab)"},
+                    {"key": "boost_genius_program", "label": "Genius Partner Program (Sub-Tab)"},
+                    {"key": "boost_preferred_program", "label": "Preferred Partner Program (Sub-Tab)"},
+                    {"key": "boost_long_stays", "label": "Long stays toolkit (Sub-Tab)"},
+                    {"key": "boost_visibility_booster", "label": "Visibility Booster (Sub-Tab)"},
+                    {"key": "boost_smart_flex", "label": "Smart Flex Reservations program (Sub-Tab)"},
+                    {"key": "boost_sponsored_listings", "label": "Sponsored Listings (Sub-Tab)"},
+                    {"key": "boost_visibility_score", "label": "Visibility Score"},
+                    {"key": "boost_preferred_status", "label": "Preferred Status"},
+                    {"key": "boost_genius_tier", "label": "Genius Tier"},
+                    {"key": "boost_conversion_rate", "label": "Conversion Rate"},
+                    {"key": "boost_competitor_rank", "label": "Competitor Rank"},
+                    {"key": "boost_search_views", "label": "Search Views"},
+                    {"key": "boost_property_views", "label": "Property Views"},
+                    {"key": "boost_bookings", "label": "Bookings"},
+                    {"key": "boost_cancellations", "label": "Cancellations"},
                 ]
             },
             {
-                "group": "Inbox / Messages",
+                "group": "Inbox",
                 "section": "inbox",
                 "fields": [
-                    {"key": "inb_guest_name",   "label": "Guest Name"},
-                    {"key": "inb_reservation_id", "label": "Reservation ID"},
-                    {"key": "inb_subject",      "label": "Message Subject"},
-                    {"key": "inb_message",      "label": "Message Body"},
-                    {"key": "inb_date",         "label": "Message Date"},
-                    {"key": "inb_status",       "label": "Read / Unread"},
+                    {"key": "inb_reservation_messages", "label": "Reservation messages (Sub-Tab)"},
+                    {"key": "inb_booking_messages", "label": "Booking.com Messages (Sub-Tab)"},
+                    {"key": "inb_guest_qa", "label": "Guest Q&A (Sub-Tab)"},
+                    {"key": "inb_guest_name", "label": "Guest Name"},
+                    {"key": "inb_subject", "label": "Subject"},
+                    {"key": "inb_message", "label": "Message"},
+                    {"key": "inb_date", "label": "Date"},
+                    {"key": "inb_status", "label": "Status"},
                 ]
             },
             {
-                "group": "Reviews",
+                "group": "Guest Reviews",
                 "section": "reviews",
                 "fields": [
-                    {"key": "rev_guest_name",    "label": "Guest Name"},
-                    {"key": "rev_score",         "label": "Review Score"},
-                    {"key": "rev_comment",       "label": "Review Comment"},
-                    {"key": "rev_response",      "label": "Your Response"},
-                    {"key": "rev_date",          "label": "Review Date"},
-                    {"key": "rev_language",      "label": "Language"},
+                    {"key": "rev_guest_reviews", "label": "Guest Reviews (Sub-Tab)"},
+                    {"key": "rev_guest_experience", "label": "Guest experience (Sub-Tab)"},
+                    {"key": "rev_guest_name", "label": "Guest Name"},
+                    {"key": "rev_score", "label": "Rating / Score"},
+                    {"key": "rev_comment", "label": "Review Comment"},
+                    {"key": "rev_date", "label": "Review Date"},
+                    {"key": "rev_response", "label": "Review Response"},
                 ]
             },
             {
-                "group": "Financial / Payouts",
+                "group": "Finance",
                 "section": "financial",
                 "fields": [
-                    {"key": "fin_payout_amount", "label": "Payout Amount"},
-                    {"key": "fin_payout_date",   "label": "Payout Date"},
-                    {"key": "fin_gross_amount",   "label": "Gross Amount"},
-                    {"key": "fin_net_amount",     "label": "Net Amount"},
-                    {"key": "fin_commission",    "label": "Commission"},
-                    {"key": "fin_payment_type",   "label": "Payment/Payout Type"},
-                    {"key": "fin_invoice_id",    "label": "Invoice ID"},
-                    {"key": "fin_status",        "label": "Payment Status"},
+                    {"key": "fin_payout_info", "label": "Payout info (Sub-Tab)"},
+                    {"key": "fin_invoices_docs", "label": "Invoices and documents (Sub-Tab)"},
+                    {"key": "fin_res_statement", "label": "Reservations statement (Sub-Tab)"},
+                    {"key": "fin_overview", "label": "Financial Overview (Sub-Tab)"},
+                    {"key": "fin_help", "label": "Finance Help (Sub-Tab)"},
+                    {"key": "fin_settings", "label": "Finance settings (Sub-Tab)"},
                 ]
             },
             {
                 "group": "Analytics",
                 "section": "analytics",
                 "fields": [
-                    {"key": "anl_sales_revenue",  "label": "Sales Revenue"},
-                    {"key": "anl_room_nights",    "label": "Room Nights Sold"},
-                    {"key": "anl_adr",            "label": "ADR"},
-                    {"key": "anl_cancellations",  "label": "Cancellations"},
-                    {"key": "anl_page_views",     "label": "Page Views"},
-                    {"key": "anl_click_through",  "label": "Click-Through Rate"},
+                    {"key": "anl_dashboard", "label": "Analytics dashboard (Sub-Tab)"},
+                    {"key": "anl_demand", "label": "Demand for BangaloreNew (Sub-Tab)"},
+                    {"key": "anl_pace", "label": "Your pace of bookings (Sub-Tab)"},
+                    {"key": "anl_sales_stats", "label": "Sales Statistics (Sub-Tab)"},
+                    {"key": "anl_booker_insights", "label": "Booker insights (Sub-Tab)"},
+                    {"key": "anl_book_window", "label": "Book Window Info (Sub-Tab)"},
+                    {"key": "anl_cancellation_char", "label": "Cancellation Characteristics (Sub-Tab)"},
+                    {"key": "anl_comparable", "label": "Comparable properties (Sub-Tab)"},
+                    {"key": "anl_genius_report", "label": "Genius Report (Sub-Tab)"},
+                    {"key": "anl_ranking", "label": "Ranking Dashboard (Sub-Tab)"},
+                    {"key": "anl_performance", "label": "Performance dashboard (Sub-Tab)"},
+                    {"key": "anl_sales_revenue", "label": "Sales Revenue"},
+                    {"key": "anl_room_nights", "label": "Room Nights"},
+                    {"key": "anl_adr", "label": "ADR"},
+                    {"key": "anl_cancellations", "label": "Cancellations"},
+                    {"key": "anl_page_views", "label": "Page Views"},
+                    {"key": "anl_click_through", "label": "CTR"},
                     {"key": "anl_booking_demand", "label": "Booking Demand"},
-                    {"key": "anl_market_share",   "label": "Market Share"},
+                    {"key": "anl_market_share", "label": "Market Share"},
                     {"key": "anl_competitor_pricing", "label": "Competitor Pricing"},
-                    {"key": "anl_booking_window", "label": "Booking Window (days ahead)"},
-                    {"key": "anl_country",        "label": "Top Country of Origin"},
-                    {"key": "anl_device",         "label": "Top Device Type"},
-                    {"key": "anl_traveler",       "label": "Top Traveler Type"},
-                ]
-            },
-            {
-                "group": "Promotions / Offers",
-                "section": "promotions",
-                "fields": [
-                    {"key": "promo_Name",                  "label": "Name"},
-                    {"key": "promo_Discount",              "label": "Discount"},
-                    {"key": "promo_Bookable_period",       "label": "Bookable period"},
-                    {"key": "promo_Stay_dates",            "label": "Stay dates"},
-                    {"key": "promo_Bookings",              "label": "Bookings"},
-                    {"key": "promo_Room_nights",           "label": "Room nights"},
-                    {"key": "promo_Average_daily_rate",    "label": "Average daily rate"},
-                    {"key": "promo_Revenue",               "label": "Revenue"},
-                    {"key": "promo_Cancelled_room_nights", "label": "Cancelled room nights"},
-                    {"key": "promo_Status",                "label": "Status"},
+                    {"key": "anl_booking_window", "label": "Booking Window"},
+                    {"key": "anl_country", "label": "Country"},
+                    {"key": "anl_device", "label": "Device"},
+                    {"key": "anl_traveler", "label": "Traveler"},
                 ]
             },
         ]
@@ -617,119 +777,123 @@ class BookingExtranetSource(ExtranetSource):
         page.wait_for_timeout(1000)
 
     def navigate_to_section(self, page, section_key: str) -> None:
+        worker = getattr(self, "worker", None)
+        # Load from saved params file if present to check if we can bypass scanning
+        params_path = COOKIES_DIR / f"{self.source_key}_params.json"
+        if params_path.exists() and not getattr(self, "current_hotel_id", None):
+            try:
+                with open(params_path, "r") as f:
+                    saved_params = json.load(f)
+                self.current_hotel_id = saved_params.get("hotel_id")
+                self.current_ses = saved_params.get("ses")
+            except Exception:
+                pass
+
         # Check if we are on the Group Homepage
         current_url = page.url.lower()
-        if "/groups/home/" in current_url:
-            # Let the DOM settle
-            page.wait_for_timeout(2000)
+        if "/groups/home/" in current_url and not getattr(self, "current_hotel_id", None):
+            if worker:
+                worker.log_msg.emit("On Group Homepage. Waiting for portfolio list to load...")
+            try:
+                page.wait_for_selector("a[href*='hotel_id'], [data-hotel-id], table, .bui-table", timeout=5000)
+            except Exception:
+                pass
+            if worker:
+                worker.log_msg.emit("Fetching property list via GraphQL API...")
             properties = []
             
-            # Helper function to scan properties on the current Group page
-            def scan_current_page():
-                return page.evaluate("""() => {
-                    const props = [];
-                    const elements = document.querySelectorAll('a, button, [data-hotel-id], [data-id]');
-                    for (const el of elements) {
-                        let hotelId = '';
-                        let hotelName = '';
-                        
-                        if (el.getAttribute('data-hotel-id')) {
-                            hotelId = el.getAttribute('data-hotel-id');
-                        } else if (el.getAttribute('data-id') && /^\d+$/.test(el.getAttribute('data-id'))) {
-                            hotelId = el.getAttribute('data-id');
-                        } else {
-                            const href = el.getAttribute('href') || '';
-                            const match = href.match(/hotel_id=(\d+)/) || href.match(/\/hotel\/(\d+)/);
-                            if (match) {
-                                hotelId = match[1];
-                            }
+            # Fetch property list via GraphQL query GroupProperties
+            try:
+                js_query = """
+                async () => {
+                    try {
+                        const propsQuery = {
+                            query: `query GroupProperties {
+                                propertyList {
+                                    properties {
+                                        hotelId
+                                        hotelName
+                                    }
+                                }
+                            }`
+                        };
+                        const r = await fetch('/dml/graphql', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(propsQuery)
+                        });
+                        const d = await r.json();
+                        if (d && d.data && d.data.propertyList && d.data.propertyList.properties) {
+                            return d.data.propertyList.properties.map(p => ({
+                                id: String(p.hotelId),
+                                name: p.hotelName || ""
+                            }));
                         }
-                        
-                        if (!hotelId || !/^\d+$/.test(hotelId)) continue;
-                        
-                        hotelName = el.textContent.trim();
-                        if (hotelName.length < 4 || /manage|select|go|enter|edit|open/i.test(hotelName) || /^\d+$/.test(hotelName)) {
-                            const row = el.closest('tr') || el.closest('[class*="row"]') || el.closest('[class*="item"]') || el.closest('li');
-                            if (row) {
-                                const cells = row.querySelectorAll('td, div, span, a');
-                                for (const cell of cells) {
-                                    if (cell === el) continue;
-                                    const txt = cell.textContent.trim();
-                                    if (txt.length >= 4 && !txt.includes('hotel_id') && !/^\d+$/.test(txt) && !/manage|select|go|enter|edit|open/i.test(txt)) {
-                                        hotelName = txt;
-                                        break;
+                    } catch (e) {
+                        return [];
+                    }
+                    return [];
+                }
+                """
+                properties = page.evaluate(js_query)
+            except Exception as e:
+                if worker:
+                    worker.log_msg.emit(f"GraphQL GroupProperties query failed: {e}. Falling back to page DOM scan.")
+                properties = []
+
+            if not properties:
+                # Fallback: scan properties on the current Group page without paginating
+                try:
+                    properties = page.evaluate("""() => {
+                        const props = [];
+                        const elements = document.querySelectorAll('a, button, [data-hotel-id], [data-id]');
+                        for (const el of elements) {
+                            let hotelId = '';
+                            let hotelName = '';
+                            
+                            if (el.getAttribute('data-hotel-id')) {
+                                hotelId = el.getAttribute('data-hotel-id');
+                            } else if (el.getAttribute('data-id') && /^\d+$/.test(el.getAttribute('data-id'))) {
+                                hotelId = el.getAttribute('data-id');
+                            } else {
+                                const href = el.getAttribute('href') || '';
+                                const match = href.match(/hotel_id=(\d+)/) || href.match(/\/hotel\/(\d+)/);
+                                if (match) {
+                                    hotelId = match[1];
+                                }
+                            }
+                            
+                            if (!hotelId || !/^\d+$/.test(hotelId)) continue;
+                            
+                            hotelName = el.textContent.trim();
+                            if (hotelName.length < 4 || /manage|select|go|enter|edit|open/i.test(hotelName) || /^\d+$/.test(hotelName)) {
+                                const row = el.closest('tr') || el.closest('[class*="row"]') || el.closest('[class*="item"]') || el.closest('li');
+                                if (row) {
+                                    const cells = row.querySelectorAll('td, div, span, a');
+                                    for (const cell of cells) {
+                                        if (cell === el) continue;
+                                        const txt = cell.textContent.trim();
+                                        if (txt.length >= 4 && !txt.includes('hotel_id') && !/^\d+$/.test(txt) && !/manage|select|go|enter|edit|open/i.test(txt)) {
+                                            hotelName = txt;
+                                            break;
+                                        }
                                     }
                                 }
                             }
+                            
+                            hotelName = hotelName.replace(/\s+/g, ' ').trim();
+                            
+                            if (!props.some(p => p.id === hotelId)) {
+                                props.push({ id: hotelId, name: hotelName });
+                            }
                         }
-                        
-                        hotelName = hotelName.replace(/\s+/g, ' ').trim();
-                        
-                        if (!props.some(p => p.id === hotelId)) {
-                            props.push({ id: hotelId, name: hotelName });
-                        }
-                    }
-                    return props;
-                }""")
-
-            # Loop through paginated Group Homepage to collect all properties (up to 1000 pages)
-            for page_num in range(1, 1000):
-                current_props = scan_current_page()
-                for p in current_props:
-                    if not any(x["id"] == p["id"] for x in properties):
-                        properties.append(p)
-                
-                # Scroll to the bottom of the page to ensure lazy-loaded pagination elements are rendered and visible
-                try:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1000)
+                        return props;
+                    }""")
                 except Exception:
                     pass
 
-                # Look for a visible pagination 'Next' link or button
-                next_btn = None
-                try:
-                    next_btn = page.query_selector(
-                        'a[class*="next"], button[class*="next"], [data-testid="pagination-next-button"], '
-                        '.bui-pagination__link[title*="Next"], .pagination__link--next, '
-                        'button[aria-label*="Next"], a[aria-label*="Next"], [class*="pagination"] [class*="next"]'
-                    )
-                    if not next_btn:
-                        buttons = page.query_selector_all('a, button, span')
-                        for btn in buttons:
-                            if btn.is_visible() and re.search(r'^(next|>|»)$', btn.inner_text().strip().lower()):
-                                next_btn = btn
-                                break
-                except Exception:
-                    pass
-                
-                if next_btn:
-                    # Check if next button is disabled (has disabled attribute or class)
-                    is_disabled = False
-                    try:
-                        is_disabled = page.evaluate("""(btn) => {
-                            return btn.hasAttribute('disabled') || 
-                                   btn.classList.contains('disabled') || 
-                                   btn.getAttribute('aria-disabled') === 'true' ||
-                                   btn.classList.contains('bui-pagination__item--disabled') ||
-                                   (btn.parentElement && (
-                                       btn.parentElement.classList.contains('bui-pagination__item--disabled') ||
-                                       btn.parentElement.classList.contains('disabled')
-                                   ));
-                        }""", next_btn)
-                    except Exception:
-                        pass
-                    if is_disabled:
-                        break
-                        
-                    try:
-                        next_btn.click()
-                        page.wait_for_timeout(1500) # Wait for page load to settle
-                    except Exception:
-                        break
-                else:
-                    break
-
+            if worker:
+                worker.log_msg.emit(f"Discovered {len(properties)} properties in portfolio.")
             self._properties = properties
         else:
             self._properties = []
@@ -740,17 +904,34 @@ class BookingExtranetSource(ExtranetSource):
         account_match = None
         hotel_match = None
         
-        for _ in range(10):
-            current_url = page.url
-            ses_match = re.search(r'ses=([a-f0-9]+)', current_url)
-            account_match = re.search(r'hotel_account_id=(\d+)', current_url)
-            hotel_match = re.search(r'hotel_id=(\d+)', current_url)
-            if ses_match or account_match or hotel_match:
-                break
-            page.wait_for_timeout(1000)
+        # Load from saved params file if present
+        params_path = COOKIES_DIR / f"{self.source_key}_params.json"
+        if params_path.exists():
+            try:
+                with open(params_path, "r") as f:
+                    saved_params = json.load(f)
+                if not getattr(self, "current_hotel_id", None):
+                    self.current_hotel_id = saved_params.get("hotel_id")
+                if not getattr(self, "current_ses", None):
+                    self.current_ses = saved_params.get("ses")
+            except Exception:
+                pass
 
-        # If no ses params, navigate to login to establish session
-        if not ses_match and not account_match and not hotel_match:
+        # Only wait if we do not have cached parameters, or if we are actively on an admin page that hasn't loaded params in the URL yet
+        has_cached_params = bool(getattr(self, "current_ses", None) and getattr(self, "current_hotel_id", None))
+        if not has_cached_params or ("admin.booking.com" in page.url.lower() and "ses=" not in page.url.lower()):
+            for _ in range(10):
+                current_url = page.url
+                ses_match = re.search(r'ses=([a-f0-9]+)', current_url)
+                account_match = re.search(r'hotel_account_id=(\d+)', current_url)
+                hotel_match = re.search(r'hotel_id=(\d+)', current_url)
+                if ses_match or account_match or hotel_match:
+                    break
+                page.wait_for_timeout(1000)
+
+
+        # If no ses params and we don't have cached session parameters, navigate to login to establish session
+        if not ses_match and not account_match and not hotel_match and not getattr(self, "current_ses", None):
             # Check if we are already on a login or error page. If so, don't trigger redundant page loads
             if "login" not in page.url.lower():
                 page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
@@ -763,35 +944,75 @@ class BookingExtranetSource(ExtranetSource):
         base = "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage"
 
         params = []
+        
+        # Use match if found, otherwise use self.current_ses
+        ses = None
         if ses_match:
-            params.append(f"ses={ses_match.group(1)}")
+            ses = ses_match.group(1)
+            self.current_ses = ses
+        elif getattr(self, "current_ses", None):
+            ses = self.current_ses
+        if ses:
+            params.append(f"ses={ses}")
+            
         if account_match:
             params.append(f"hotel_account_id={account_match.group(1)}")
             
         # Override hotel_id if we scanned properties from group homepage
         properties = getattr(self, "_properties", [])
+        hotel_id = None
         if properties:
-            params.append(f"hotel_id={properties[0]['id']}")
+            hotel_id = properties[0]['id']
+            self.current_hotel_id = hotel_id
         elif hotel_match:
-            params.append(f"hotel_id={hotel_match.group(1)}")
+            hotel_id = hotel_match.group(1)
+            self.current_hotel_id = hotel_id
+        elif getattr(self, "current_hotel_id", None):
+            hotel_id = self.current_hotel_id
             
+        if hotel_id:
+            params.append(f"hotel_id={hotel_id}")
+            
+        # Persist updated parameters to JSON if we have both
+        if ses and hotel_id:
+            try:
+                params_path = COOKIES_DIR / f"{self.source_key}_params.json"
+                with open(params_path, "w") as f:
+                    json.dump({"hotel_id": hotel_id, "ses": ses}, f)
+            except Exception:
+                pass
+
         params.append("lang=en")
-        param_str = "?" + "&".join(params) if (ses_match or account_match or hotel_match or properties) else ""
+        param_str = "?" + "&".join(params) if params else ""
+
 
         section_map = {
             "dashboard":     f"{base}/home.html{param_str}",
-            "reservations":  f"{base}/reservations.html{param_str}",
+            "reservations":  f"{base}/search_reservations.html{param_str}",
             "rates":         f"{base}/rates_availability.html{param_str}",
-            "property":      f"{base}/property.html{param_str}",
-            "boost":         f"{base}/boost_performance.html{param_str}",
-            "inbox":         f"{base}/inbox.html{param_str}",
+            "property":      f"{base}/content_score.html{param_str}",
+            "boost":         f"{base}/opportunities.html{param_str}",
+            "inbox":         f"{base}/messaging/inbox.html{param_str}",
             "reviews":       f"{base}/reviews.html{param_str}",
-            "financial":     f"{base}/finance.html{param_str}",
-            "analytics":     f"{base}/analytics.html{param_str}",
+            "financial":     f"{base}/finance_overview.html{param_str}",
+            "analytics":     f"{base}/statistics/index.html{param_str}",
             "promotions":    f"{base}/promotions/list.html{param_str}",
         }
         url = section_map.get(section_key, base)
-        page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        
+        # Load section via fast fetch if possible
+        use_fast_fetch = getattr(getattr(self, 'job', None), 'fast_mode', True)
+        if use_fast_fetch:
+            if worker:
+                worker.log_msg.emit(f"  -> Background fetching section '{section_key}'...")
+            html = self._fast_fetch_html(page, url)
+            is_login_redirect = "sign-in" in html or "op_token" in html or len(html) < 200
+            if html and not html.startswith("FETCH_ERROR") and not is_login_redirect:
+                page.set_content(html, wait_until="commit")
+            else:
+                page.goto(url, timeout=30000, wait_until="domcontentloaded")
+        else:
+            page.goto(url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_timeout(1000)
 
     # ── Section-aware field extraction ──────────────────────
@@ -1265,92 +1486,158 @@ class BookingExtranetSource(ExtranetSource):
         return rows
 
     def _extract_single_property_data(self, page, field_keys: list[str], section: str) -> list[dict]:
-        # ── Section-specific extraction ──────────────────────
-        if section == "property":
-            row = self._extract_property_fields(page, field_keys)
-            if any(row.values()):
-                return [row]
+        # Get labels for the keys
+        job = getattr(self, "job", None)
+        selected_fields_map = {}
+        if job:
+            for f in job.selected_fields:
+                selected_fields_map[f["key"]] = f["label"]
+        
+        # Fallback maps
+        if not selected_fields_map:
+            # Reconstruct labels from our available_fields if job is not populated
+            for group_info in self.available_fields:
+                for f in group_info["fields"]:
+                    selected_fields_map[f["key"]] = f["label"]
 
-        elif section == "dashboard":
-            rows = self._extract_dashboard_fields(page, field_keys)
+        all_rows = []
+        worker = getattr(self, "worker", None)
+        
+        # Separate sub-tab keys from specific data/column keys
+        sub_tab_keys = [k for k in field_keys if k in self.SUB_TAB_FIELDS]
+        data_keys = [k for k in field_keys if k not in self.SUB_TAB_FIELDS]
+        
+        # 1. Scrape specific data fields in a single pass (if any)
+        if data_keys:
+            if worker:
+                worker.log_msg.emit(f"  -> Extracting standard data fields: {', '.join(data_keys)}")
+            rows = []
+            if section == "property":
+                row = self._extract_property_fields(page, data_keys)
+                if row:
+                    rows = [row]
+            elif section == "dashboard":
+                rows = self._extract_dashboard_fields(page, data_keys)
+            elif section == "reviews":
+                rows = self._extract_review_fields(page, data_keys)
+            elif section == "inbox":
+                rows = self._extract_inbox_fields(page, data_keys)
+            elif section == "boost":
+                rows = self._extract_boost_fields(page, data_keys)
+            elif section == "analytics":
+                rows = self._extract_analytics_fields(page, data_keys)
+            elif section == "promotions":
+                rows = self._extract_promotions_fields(page, data_keys)
+            else:
+                rows = self._generic_fallback(page)
+                
             if rows:
-                return rows
-
-        elif section == "reservations":
-            rows = self._extract_table_fields(page, field_keys, {
-                "booking": "res_booking_id", "id": "res_booking_id", "confirmation": "res_booking_id",
-                "guest": "res_guest_name", "name": "res_guest_name",
-                "check-in": "res_check_in", "check in": "res_check_in", "arrival": "res_check_in",
-                "check-out": "res_check_out", "check out": "res_check_out", "departure": "res_check_out",
-                "booked": "res_booked_date", "booking date": "res_booked_date", "booked date": "res_booked_date",
-                "guests": "res_number_of_guests", "number of guests": "res_number_of_guests", "pax": "res_number_of_guests",
-                "room": "res_room_type", "room type": "res_room_type",
-                "status": "res_status",
-                "price": "res_total_price", "total": "res_total_price", "amount": "res_total_price",
-                "commission": "res_commission",
-                "balance": "res_balance", "due": "res_balance",
-            })
+                for r in rows:
+                    r["sub_tab"] = "General Data"
+                all_rows.extend(rows)
+                
+        # 2. Fetch and scrape sub-tabs sequentially
+        for key in sub_tab_keys:
+            label = selected_fields_map.get(key, key)
+            
+            path = self.SUB_TAB_URLS.get(key)
+            clicked = False
+            
+            if path:
+                # Use stored hotel_id and ses if available, otherwise get from page URL
+                hotel_id = getattr(self, "current_hotel_id", None)
+                if not hotel_id:
+                    hotel_id_match = re.search(r'hotel_id=(\d+)', page.url)
+                    hotel_id = hotel_id_match.group(1) if hotel_id_match else ""
+                
+                ses = getattr(self, "current_ses", None)
+                if not ses:
+                    ses_match = re.search(r'ses=([a-f0-9]+)', page.url)
+                    ses = ses_match.group(1) if ses_match else ""
+                
+                if hotel_id and ses:
+                    sub_tab_url = f"https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/{path}?hotel_id={hotel_id}&ses={ses}&lang=en"
+                    if worker:
+                        worker.log_msg.emit(f"  -> Background fetching sub-tab: {label}...")
+                    
+                    html = self._fast_fetch_html(page, sub_tab_url)
+                    is_login_redirect = "sign-in" in html or "op_token" in html or len(html) < 200
+                    
+                    if html and not html.startswith("FETCH_ERROR") and not is_login_redirect:
+                        page.set_content(html, wait_until="commit")
+                        clicked = True
+                    else:
+                        if worker:
+                            worker.log_msg.emit(f"  -> Fast fetch failed for sub-tab {label}. Falling back to click.")
+                        clicked = self._navigate_to_sub_tab(page, label)
+                else:
+                    clicked = self._navigate_to_sub_tab(page, label)
+            else:
+                clicked = self._navigate_to_sub_tab(page, label)
+                
+            if clicked:
+                if worker:
+                    worker.log_msg.emit(f"  -> Navigated/Loaded sub-tab: {label}")
+            else:
+                if worker:
+                    worker.log_msg.emit(f"  -> (Sub-tab link '{label}' not loaded or already active)")
+                
+            # Now extract data from this sub-page
+            rows = []
+            
+            if key == "prop_photos":
+                photo_urls = page.evaluate("""() => {
+                    const imgs = document.querySelectorAll('img[class*="photo"], img[class*="gallery"], [class*="photo"] img, [class*="gallery"] img');
+                    const urls = [];
+                    for (const img of imgs) {
+                        const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+                        if (src && !urls.includes(src)) urls.push(src);
+                    }
+                    return urls.join('; ');
+                }""")
+                if photo_urls:
+                    rows = [{"photos": photo_urls}]
+            elif key == "rev_guest_reviews":
+                rows = self._extract_review_fields(page, ["rev_guest_name", "rev_score", "rev_comment", "rev_date", "rev_response"])
+            elif key in ["inb_reservation_messages", "inb_booking_messages", "inb_guest_qa"]:
+                rows = self._extract_inbox_fields(page, ["inb_guest_name", "inb_subject", "inb_message", "inb_date", "inb_status"])
+            elif key == "promo_active":
+                rows = self._extract_promotions_fields(page, ["promo_Name", "promo_Discount", "promo_Bookable_period", "promo_Stay_dates", "promo_Bookings", "promo_Room_nights", "promo_Average_daily_rate", "promo_Revenue", "promo_Cancelled_room_nights", "promo_Status"])
+            elif key in ["boost_opportunity_center", "boost_genius_program", "boost_preferred_program", "boost_long_stays", "boost_visibility_booster", "boost_smart_flex", "boost_sponsored_listings"]:
+                rows = self._extract_boost_fields(page, ["boost_visibility_score", "boost_preferred_status", "boost_genius_tier", "boost_conversion_rate", "boost_competitor_rank", "boost_search_views", "boost_property_views", "boost_bookings", "boost_cancellations"])
+            elif key in ["anl_dashboard", "anl_demand", "anl_pace", "anl_sales_stats", "anl_booker_insights", "anl_book_window", "anl_cancellation_char", "anl_comparable", "anl_genius_report", "anl_ranking", "anl_performance"]:
+                rows = self._extract_analytics_fields(page, ["anl_sales_revenue", "anl_room_nights", "anl_adr", "anl_cancellations", "anl_page_views", "anl_click_through", "anl_booking_demand", "anl_market_share", "anl_competitor_pricing", "anl_booking_window", "anl_country", "anl_device", "anl_traveler"])
+            else:
+                # Use generic fallback to parse tables, lists, or text
+                rows = self._generic_fallback(page)
+                
+            # Tag rows with the sub-tab name
             if rows:
-                return rows
+                for r in rows:
+                    r["sub_tab"] = label
+                all_rows.extend(rows)
+                
+        # If nothing was extracted at all, do a generic fallback on the current page
+        if not all_rows:
+            all_rows = self._generic_fallback(page)
+            for r in all_rows:
+                r["sub_tab"] = "General"
+                
+        return all_rows
 
-        elif section == "rates":
-            rows = self._extract_table_fields(page, field_keys, {
-                "plan": "rate_plan_name", "rate plan": "rate_plan_name",
-                "price": "rate_plan_price", "rate": "rate_plan_price",
-                "room": "rate_room_type", "room type": "rate_room_type",
-                "available": "rate_availability", "availability": "rate_availability",
-                "allotment": "rate_allotment", "inventory": "rate_allotment",
-                "booked": "rate_booked", "sold": "rate_booked",
-                "min": "rate_los_min", "min stay": "rate_los_min",
-                "max": "rate_los_max", "max stay": "rate_los_max",
-                "restriction": "rate_restrictions",
-                "meal": "rate_meal_plan", "board": "rate_meal_plan",
-                "cancel": "rate_cancel_policy", "cancellation": "rate_cancel_policy",
-            })
-            if rows:
-                return rows
 
-        elif section == "reviews":
-            rows = self._extract_review_fields(page, field_keys)
-            if rows:
-                return rows
-
-        elif section == "inbox":
-            rows = self._extract_inbox_fields(page, field_keys)
-            if rows:
-                return rows
-
-        elif section == "boost":
-            rows = self._extract_boost_fields(page, field_keys)
-            if rows:
-                return rows
-
-        elif section == "analytics":
-            rows = self._extract_analytics_fields(page, field_keys)
-            if rows:
-                return rows
-
-        elif section == "promotions":
-            rows = self._extract_promotions_fields(page, field_keys)
-            if rows:
-                return rows
-
-        elif section == "financial":
-            rows = self._extract_table_fields(page, field_keys, {
-                "amount": "fin_payout_amount", "payout": "fin_payout_amount",
-                "date": "fin_payout_date", "payout date": "fin_payout_date",
-                "gross": "fin_gross_amount", "gross amount": "fin_gross_amount", "room fee": "fin_gross_amount",
-                "payment type": "fin_payment_type", "payout type": "fin_payment_type", "method": "fin_payment_type",
-                "net": "fin_net_amount", "net amount": "fin_net_amount",
-                "commission": "fin_commission",
-                "invoice": "fin_invoice_id", "id": "fin_invoice_id",
-                "status": "fin_status", "payment": "fin_status",
-            })
-            if rows:
-                return rows
-
-        # ── Generic fallback (inherited from ExtranetSource) ─
-        return self._generic_fallback(page)
+    def _fast_fetch_html(self, page, url: str) -> str:
+        js_code = """
+        async (targetUrl) => {
+            try {
+                const r = await fetch(targetUrl);
+                return await r.text();
+            } catch (e) {
+                return "FETCH_ERROR: " + e.message;
+            }
+        }
+        """
+        return page.evaluate(js_code, url)
 
     def _extract_property_name_from_page(self, page) -> str:
         """Extract the exact hotel/property name from the current extranet page."""
@@ -1454,14 +1741,14 @@ class BookingExtranetSource(ExtranetSource):
             base = "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage"
             section_paths = {
                 "dashboard": "home.html",
-                "reservations": "reservations.html",
+                "reservations": "search_reservations.html",
                 "rates": "rates_availability.html",
-                "property": "property.html",
-                "boost": "boost_performance.html",
-                "inbox": "inbox.html",
+                "property": "content_score.html",
+                "boost": "opportunities.html",
+                "inbox": "messaging/inbox.html",
                 "reviews": "reviews.html",
-                "financial": "finance.html",
-                "analytics": "analytics.html",
+                "financial": "finance_overview.html",
+                "analytics": "statistics/index.html",
                 "promotions": "promotions/list.html",
             }
             path = section_paths.get(section, "promotions/list.html")
@@ -1491,7 +1778,23 @@ class BookingExtranetSource(ExtranetSource):
                 
                 url = f"{base}/{path}?hotel_id={hotel_id}&ses={ses}&lang=en"
                 try:
-                    page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                    self.current_hotel_id = hotel_id
+                    self.current_ses = ses
+                    
+                    use_fast_fetch = getattr(getattr(self, 'job', None), 'fast_mode', True)
+                    if use_fast_fetch:
+                        if worker:
+                            worker.log_msg.emit(f"  -> Background fetching main page for {hotel_name} ({hotel_id})...")
+                        html = self._fast_fetch_html(page, url)
+                        is_login_redirect = "sign-in" in html or "op_token" in html or len(html) < 200
+                        if html and not html.startswith("FETCH_ERROR") and not is_login_redirect:
+                            page.set_content(html, wait_until="commit")
+                        else:
+                            if worker:
+                                worker.log_msg.emit(f"  -> Fast fetch failed or session expired. Falling back to page.goto.")
+                            page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                    else:
+                        page.goto(url, timeout=30000, wait_until="domcontentloaded")
                     
                     # Dynamic wait for page contents to render (promotions table, cards, or empty state text)
                     try:
@@ -1544,8 +1847,27 @@ class BookingExtranetSource(ExtranetSource):
         # Single-property extraction logic
         # For single property, also try to tag with the exact hotel name and ID if we are on a valid extranet page
         exact_hotel_name = self._extract_property_name_from_page(page)
+        
         hotel_id_match = re.search(r'hotel_id=(\d+)', page.url)
-        hotel_id = hotel_id_match.group(1) if hotel_id_match else "single"
+        if hotel_id_match:
+            self.current_hotel_id = hotel_id_match.group(1)
+        hotel_id = getattr(self, "current_hotel_id", None) or "single"
+        
+        ses_match = re.search(r'ses=([a-f0-9]+)', page.url)
+        if ses_match:
+            self.current_ses = ses_match.group(1)
+        ses = getattr(self, "current_ses", None) or ""
+
+        # Persist updated parameters to JSON if we found new ones
+        if (hotel_id_match or ses_match) and ses and hotel_id and hotel_id != "single":
+            try:
+                params_path = COOKIES_DIR / f"{self.source_key}_params.json"
+                with open(params_path, "w") as f:
+                    json.dump({"hotel_id": hotel_id, "ses": ses}, f)
+            except Exception:
+                pass
+
+        
         if not exact_hotel_name:
             exact_hotel_name = "Single Property"
             
@@ -2907,6 +3229,10 @@ EXTRANET_SOURCES: dict[str, ExtranetSource] = {
     "hotels_extranet":  HotelsExtranetSource(),
 }
 
+for key, src in EXTRANET_SOURCES.items():
+    src.source_key = key
+
+
 
 # ────────────────────────────────────────────────────────────
 #  Config system
@@ -3176,7 +3502,7 @@ class ExtranetScrapeWorker(QThread):
         for k in field_keys:
             if k not in ordered_keys:
                 ordered_keys.append(k)
-        for k in ["hotel_id", "hotel_name", "_source", "_error"]:
+        for k in ["hotel_id", "hotel_name", "sub_tab", "_source", "_error"]:
             if k not in ordered_keys:
                 ordered_keys.append(k)
         
@@ -3313,6 +3639,24 @@ class ExtranetScrapeWorker(QThread):
                     cookies = context.cookies()
                     with open(cookies_path, "wb") as f:
                         pickle.dump(cookies, f)
+                    
+                    # Extract and save session params
+                    try:
+                        url = page.url
+                        hotel_id_match = re.search(r'hotel_id=(\d+)', url)
+                        ses_match = re.search(r'ses=([a-f0-9]+)', url)
+                        params = {}
+                        if hotel_id_match:
+                            params["hotel_id"] = hotel_id_match.group(1)
+                        if ses_match:
+                            params["ses"] = ses_match.group(1)
+                        if params:
+                            params_path = COOKIES_DIR / f"{source.source_key}_params.json"
+                            with open(params_path, "w") as f:
+                                json.dump(params, f)
+                    except Exception:
+                        pass
+                    
                     self.log_msg.emit("Session refreshed.")
             else:
                 self.log_msg.emit(f"Navigating to {source.source_name} login page...")
@@ -3343,8 +3687,8 @@ class ExtranetScrapeWorker(QThread):
             for field in self.job.selected_fields:
                 key = field["key"]
                 parts = key.split("_")
-                # Try compound prefix first (e.g. "exp_ci" → insights),
-                # then fall back to single prefix (e.g. "exp" → reservations)
+                # Try compound prefix first (e.g. "exp_ci" -> insights),
+                # then fall back to single prefix (e.g. "exp" -> reservations)
                 compound_key = "_".join(parts[:2]) if len(parts) >= 3 else None
                 simple_key = parts[0] if len(parts) >= 2 else "general"
                 # Map short prefixes to actual section keys
@@ -3358,8 +3702,18 @@ class ExtranetScrapeWorker(QThread):
                     "goi_rpt": "reports",
                     "mmt_rev": "reviews",          # MMT Reviews
                     "mmt_settlement": "financial",  # MMT Financial
+                    "mmt_prop": "property",         # MMT Property
+                    "mmt_amenities": "property",    # MMT Amenities
+                    "mmt_room_inventory": "property", # MMT Room Inventory
+                    "mmt_content": "property",      # MMT Content Score
+                    "mmt_missing": "property",      # MMT Missing Checklist
                     "goi_rev": "reviews",           # Goibibo Reviews
                     "goi_settlement": "financial",  # Goibibo Financial
+                    "goi_prop": "property",         # Goibibo Property
+                    "goi_amenities": "property",    # Goibibo Amenities
+                    "goi_room_inventory": "property", # Goibibo Room Inventory
+                    "goi_content": "property",      # Goibibo Content Score
+                    "goi_missing": "property",      # Goibibo Missing Checklist
                     "agd_rev": "reviews",           # Agoda Reviews
                     "agd_prop": "property",         # Agoda Property
                     "exp_rev": "reviews",           # Expedia Reviews
@@ -3415,8 +3769,16 @@ class ExtranetScrapeWorker(QThread):
                     page.wait_for_timeout(1000)  # let the page render
                     rows = source.extract_data(page, fields)
 
-                self.log_msg.emit(f"  → Got {len(rows)} rows from '{section_key}'")
+                self.log_msg.emit(f"  -> Got {len(rows)} rows from '{section_key}'")
                 all_rows.extend(rows)
+
+            # Extract property name before closing the browser context to prevent Playwright target closed exceptions.
+            hotel_name = "Active Property"
+            try:
+                if page and not page.is_closed():
+                    hotel_name = source._extract_property_name_from_page(page) or "Active Property"
+            except Exception:
+                pass
 
             context.close()
             pw.stop()
@@ -3460,6 +3822,13 @@ class ExtranetScrapeWorker(QThread):
                     wb.save(output_path)
                 except Exception as e:
                     self.log_msg.emit(f"Error writing final Excel file: {e}")
+
+                # Log single property scrape status to SQLite
+                try:
+                    hotel_id = "single"
+                    ScrapeHistoryManager.add_scraped_property(self.session_id, hotel_id, hotel_name, "Completed", len(cleaned_all_rows))
+                except Exception as e:
+                    self.log_msg.emit(f"Warning: could not write scrape history: {e}")
 
                 ScrapeHistoryManager.complete_session(self.session_id, "Completed")
                 
@@ -3579,6 +3948,11 @@ class UniversalScraperTab(QWidget):
         self.login_btn.clicked.connect(self._on_login_btn_clicked)
         src_row.addWidget(self.login_btn)
 
+        self.clear_cache_btn = QPushButton("Clear Cache")
+        self.clear_cache_btn.setStyleSheet("background-color: #c0392b; padding: 8px 16px;")
+        self.clear_cache_btn.clicked.connect(self._clear_cache)
+        src_row.addWidget(self.clear_cache_btn)
+
         self.session_label = QLabel("Not logged in")
         self.session_label.setStyleSheet("color: #888; font-size: 11px;")
         src_row.addWidget(self.session_label)
@@ -3684,6 +4058,17 @@ class UniversalScraperTab(QWidget):
         layout.addWidget(self.progress)
 
         # ── Log ───────────────────────────────────────────
+        log_header_layout = QHBoxLayout()
+        log_header_layout.addWidget(QLabel("Log:"))
+        log_header_layout.addStretch()
+        
+        clear_log_btn = QPushButton("Clear Logs")
+        clear_log_btn.setStyleSheet("background-color: #7f8c8d; font-size: 10px; padding: 2px 8px; max-height: 20px;")
+        clear_log_btn.clicked.connect(lambda: self.log.clear())
+        log_header_layout.addWidget(clear_log_btn)
+        
+        layout.addLayout(log_header_layout)
+        
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumHeight(80)
@@ -3691,7 +4076,6 @@ class UniversalScraperTab(QWidget):
             "background-color: #16213e; color: #a0e0a0; border: 1px solid #333; "
             "border-radius: 4px; font-family: Consolas; font-size: 11px;"
         )
-        layout.addWidget(QLabel("Log:"))
         layout.addWidget(self.log)
 
         # ── Live Preview ──────────────────────────────────
@@ -3957,6 +4341,46 @@ class UniversalScraperTab(QWidget):
             self.session_label.setText("Not logged in")
             self.session_label.setStyleSheet("color: #888; font-size: 11px;")
 
+    def _clear_cache(self):
+        import shutil
+        self.log_msg("\nClearing cache and login sessions...")
+        cookie_files = [
+            BOOKING_EXTRANET_COOKIES,
+            MMT_EXTRANET_COOKIES,
+            GOIBIBO_EXTRANET_COOKIES,
+            AGODA_EXTRANET_COOKIES,
+            EXPEDIA_EXTRANET_COOKIES
+        ]
+        cleared_count = 0
+        for f in cookie_files:
+            try:
+                if f.exists():
+                    f.unlink()
+                    cleared_count += 1
+            except Exception as e:
+                self.log_msg(f"Could not delete cookie file {f.name}: {e}")
+
+        # Clear saved session params JSON files
+        for key in EXTRANET_SOURCES.keys():
+            params_file = COOKIES_DIR / f"{key}_params.json"
+            if params_file.exists():
+                try:
+                    params_file.unlink()
+                except Exception:
+                    pass
+
+        chrome_profile_dir = COOKIES_DIR / 'chrome_extranet'
+        if chrome_profile_dir.exists():
+            try:
+                shutil.rmtree(chrome_profile_dir, ignore_errors=False)
+                self.log_msg("Chrome persistent profile directory deleted.")
+            except Exception as e:
+                self.log_msg(f"Warning: Could not completely delete Chrome profile folder: {e}")
+                self.log_msg("Some browser files may be locked. Please make sure all scraper browser windows are closed.")
+        
+        self.log_msg("Session cache and local cookie files cleared successfully.")
+        self._update_session_status()
+
     def _on_login_btn_clicked(self):
         if self._login_mode == "login":
             self._do_login()
@@ -3977,6 +4401,25 @@ class UniversalScraperTab(QWidget):
 
         def login_thread():
             try:
+                # Terminate only Chrome instances running on our debug port or using our profile to prevent affecting user's personal Chrome
+                try:
+                    import psutil
+                    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                        try:
+                            if proc.info['name'] == 'chrome.exe':
+                                cmdline = proc.info['cmdline'] or []
+                                cmd_str = ' '.join(cmdline).lower()
+                                if 'remote-debugging-port=9223' in cmd_str or 'chrome_extranet' in cmd_str:
+                                    p = psutil.Process(proc.info['pid'])
+                                    p.terminate()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    lock_file = COOKIES_DIR / 'chrome_extranet' / 'SingletonLock'
+                    if lock_file.exists():
+                        lock_file.unlink()
+                except Exception:
+                    pass
+
                 pw = sync_playwright().start()
                 context = pw.chromium.launch_persistent_context(
                     user_data_dir=str(COOKIES_DIR / 'chrome_extranet'),
@@ -3999,6 +4442,24 @@ class UniversalScraperTab(QWidget):
                 if hasattr(source, 'cookies_path'):
                     with open(source.cookies_path, "wb") as f:
                         pickle.dump(cookies, f)
+                
+                # Extract and save session params
+                try:
+                    url = page.url
+                    hotel_id_match = re.search(r'hotel_id=(\d+)', url)
+                    ses_match = re.search(r'ses=([a-f0-9]+)', url)
+                    params = {}
+                    if hotel_id_match:
+                        params["hotel_id"] = hotel_id_match.group(1)
+                    if ses_match:
+                        params["ses"] = ses_match.group(1)
+                    if params:
+                        params_path = COOKIES_DIR / f"{source.source_key}_params.json"
+                        with open(params_path, "w") as f:
+                            json.dump(params, f)
+                except Exception:
+                    pass
+                
                 context.close()
                 pw.stop()
                 self.log_signal.emit(f"{source.source_name} session saved!")
@@ -4011,7 +4472,7 @@ class UniversalScraperTab(QWidget):
 
     def _show_confirm_login_button(self):
         self._login_mode = "confirm"
-        self.login_btn.setText("Click here after logging in → Confirm")
+        self.login_btn.setText("Click here after logging in -> Confirm")
         self.login_btn.setStyleSheet(
             "background-color: #f39c12; font-weight: bold; padding: 8px 16px;"
         )
@@ -4190,7 +4651,7 @@ class UniversalScraperTab(QWidget):
         self._reset_login_button()
         if output_path and rows >= 0:
             self._load_history_into_table()
-            self.log_msg(f"\n✓ Complete! {rows} rows → {output_path}")
+            self.log_msg(f"\n✓ Complete! {rows} rows -> {output_path}")
             self.progress.setFormat(f"Done! {rows} rows")
         else:
             self.progress.setFormat("No data extracted")
@@ -4203,7 +4664,7 @@ class UniversalScraperTab(QWidget):
     def _on_worker_login_required(self, message: str):
         self.log_msg(message)
         self.log_msg("Chrome opened — log in to the browser window, then click Confirm Login below.")
-        self.login_btn.setText("Click here after logging in → Confirm (Worker)")
+        self.login_btn.setText("Click here after logging in -> Confirm (Worker)")
         self.login_btn.setStyleSheet(
             "background-color: #e67e22; font-weight: bold; padding: 8px 16px;"
         )

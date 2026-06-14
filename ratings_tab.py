@@ -282,6 +282,11 @@ class RatingsTab(QWidget):
         self.deep_extract_cb.setStyleSheet("color: #ccc; font-size: 11px;")
         btn_row.addWidget(self.deep_extract_cb)
 
+        self.find_parallel_cb = QCheckBox("Find Parallel Listings")
+        self.find_parallel_cb.setStyleSheet("color: #ccc; font-size: 11px;")
+        self.find_parallel_cb.setToolTip("Find duplicate/parallel listings using Lat & Long coordinates")
+        btn_row.addWidget(self.find_parallel_cb)
+
         btn_row.addWidget(QLabel("Workers:"))
         self.worker_spin = QSpinBox()
         self.worker_spin.setRange(1, 100)
@@ -307,6 +312,11 @@ class RatingsTab(QWidget):
         self.stop_btn.setStyleSheet("background-color: #c0392b; font-weight: bold;")
         self.stop_btn.setEnabled(False)
         btn_row.addWidget(self.stop_btn)
+
+        self.settings_btn = QPushButton("⚙ Settings")
+        self.settings_btn.clicked.connect(self.show_settings)
+        self.settings_btn.setStyleSheet("background-color: #4a5568; font-weight: bold;")
+        btn_row.addWidget(self.settings_btn)
 
         layout.addLayout(btn_row)
 
@@ -543,9 +553,21 @@ class RatingsTab(QWidget):
     # ── Frontend Link Finder ──────────────────────────────────
     
     def find_frontend_links(self):
-        text = self.bulk_input.toPlainText().strip()
+        text = ""
+        if self.items:
+            # If a CSV was loaded, use the names from self.items
+            # Fallback to whatever URL or hotel_id if name is missing
+            query_list = []
+            for item in self.items:
+                target = item.get('name') or item.get('url') or item.get('hotel_id') or ""
+                query_list.append(target)
+            text = "\n".join(query_list)
+        else:
+            # Otherwise use the pasted text
+            text = self.bulk_input.toPlainText().strip()
+            
         if not text:
-            self.log.append("❌ Please paste hotel names in the text area first!")
+            self.log.append("❌ Please paste hotel names or load a CSV first!")
             return
             
         self.find_links_btn.setEnabled(False)
@@ -553,13 +575,26 @@ class RatingsTab(QWidget):
         self.start_btn.setEnabled(False)
         self.bulk_input.clear()
         
+        self.resolved_results = [None] * len(self.items) if self.items else []
+        
+        # Check for Gemini API key
+        import os
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            from PyQt6.QtWidgets import QInputDialog
+            key, ok = QInputDialog.getText(self, "AI Verification Setup", 
+                                           "To enable AI Verification for better accuracy, please enter a Google Gemini API Key (or leave blank to skip):")
+            if ok and key.strip():
+                os.environ["GEMINI_API_KEY"] = key.strip()
+
         plat = self._active_platform
         if plat == 'quick':
             plat = 'any'
             
         deep_extract = self.deep_extract_cb.isChecked()
+        find_parallel = self.find_parallel_cb.isChecked()
             
-        self.research_worker = DeepResearchWorker(text, plat, deep_extract=deep_extract)
+        self.research_worker = DeepResearchWorker(text, plat, deep_extract=deep_extract, items_context=self.items, find_parallel=find_parallel)
         self.research_worker.signals.log.connect(self.log.append)
         self.research_worker.signals.finished.connect(self._on_frontend_link_found)
         self.research_worker.start()
@@ -581,31 +616,58 @@ class RatingsTab(QWidget):
             
             # Prompt user to download CSV
             current_text = self.bulk_input.toPlainText().strip()
-            if current_text:
+            if current_text or self.resolved_results:
                 from PyQt6.QtWidgets import QMessageBox
                 reply = QMessageBox.question(
                     self, "Download Links",
-                    "Frontend links have been extracted!\n\nWould you like to download them as a CSV file?",
+                    "Frontend links have been extracted!\n\nWould you like to download the updated CSV (preserving all input columns)?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
                 if reply == QMessageBox.StandardButton.Yes:
-                    path, _ = QFileDialog.getSaveFileName(self, "Save Frontend Links", "frontend_links.csv", "CSV Files (*.csv)")
+                    path, _ = QFileDialog.getSaveFileName(self, "Save Resolved CSV", "resolved_properties.csv", "CSV Files (*.csv)")
                     if path:
                         try:
-                            with open(path, 'w', newline='', encoding='utf-8') as f:
+                            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
                                 import csv
                                 writer = csv.writer(f)
-                                writer.writerow(["URL", "Hotel_ID"])
-                                for line in current_text.split('\n'):
-                                    parts = line.split('|')
-                                    url = parts[0].strip()
-                                    hid = parts[1].strip() if len(parts) > 1 else ''
-                                    writer.writerow([url, hid])
-                            QMessageBox.information(self, "Success", f"Links successfully saved to:\n{path}")
+                                headers = list(self.original_headers)
+                                url_header = "Resolved URL"
+                                id_header = "Resolved Hotel ID"
+                                
+                                if url_header not in headers:
+                                    headers.append(url_header)
+                                if id_header not in headers:
+                                    headers.append(id_header)
+                                
+                                writer.writerow(headers)
+                                
+                                for idx, row in enumerate(self.original_rows):
+                                    new_row = list(row)
+                                    resolved = self.resolved_results[idx] if idx < len(self.resolved_results) else None
+                                    resolved_url = ""
+                                    resolved_hid = ""
+                                    if resolved:
+                                        url_val = resolved.get('url', '')
+                                        if '\n' in url_val:
+                                            resolved_url = url_val.replace('\n', ', ')
+                                        else:
+                                            parts = url_val.split('|')
+                                            resolved_url = parts[0].strip()
+                                        resolved_hid = resolved.get('hotel_id', '')
+                                    new_row.append(resolved_url)
+                                    new_row.append(resolved_hid)
+                                    writer.writerow(new_row)
+                                    
+                            QMessageBox.information(self, "Success", f"CSV successfully saved to:\n{path}")
                         except Exception as e:
                             QMessageBox.warning(self, "Error", f"Failed to save CSV:\n{e}")
             return
             
+        # Store resolved result at query index
+        idx = result.get('query_index')
+        if idx is not None and idx < len(self.resolved_results):
+            self.resolved_results[idx] = result
+
         # Append the resolved link to the bulk_input window
         current = self.bulk_input.toPlainText().strip()
         new_link = result['url']
@@ -684,7 +746,13 @@ class RatingsTab(QWidget):
 
             city_idx = find_col('city', 'location')
             link_idx = find_col('booking', 'mmt', 'goibibo', 'gi', 'agoda', 'expedia', 'link', 'url')
-            id_idx = find_col('fhid', 'fh id', 'fh', 'front-end id', 'mmt id', 'hotel code', 'hotel id', 'hotel_id', 'code', 'id')
+            id_idx = find_col('fhid', 'fh id', 'fh', 'front-end id', 'hotel code', 'hotel id', 'hotel_id', 'code', 'id')
+            mmt_id_idx = find_col('mmt id', 'mmt_id', 'makemytrip id')
+            bcom_id_idx = find_col('b.com id', 'booking id', 'booking.com id', 'bcom id')
+            address_idx = find_col('address', 'addr')
+            lat_idx = find_col('latitude', 'lat')
+            lon_idx = find_col('longitude', 'lon', 'lng', 'long')
+            zip_idx = find_col('zipcode', 'zip', 'pin', 'pincode', 'postal')
 
             if link_idx is not None and header_idx + 1 < len(rows):
                 test_row = rows[header_idx + 1]
@@ -703,6 +771,12 @@ class RatingsTab(QWidget):
                 city = row[city_idx].strip() if city_idx is not None and city_idx < len(row) else ''
                 url = row[link_idx].strip() if link_idx is not None and link_idx < len(row) else ''
                 hotel_id = row[id_idx].strip() if id_idx is not None and id_idx < len(row) else ''
+                mmt_id = row[mmt_id_idx].strip() if mmt_id_idx is not None and mmt_id_idx < len(row) else ''
+                bcom_id = row[bcom_id_idx].strip() if bcom_id_idx is not None and bcom_id_idx < len(row) else ''
+                address = row[address_idx].strip() if address_idx is not None and address_idx < len(row) else ''
+                latitude = row[lat_idx].strip() if lat_idx is not None and lat_idx < len(row) else ''
+                longitude = row[lon_idx].strip() if lon_idx is not None and lon_idx < len(row) else ''
+                zipcode = row[zip_idx].strip() if zip_idx is not None and zip_idx < len(row) else ''
                 raw_line = ' '.join(row).strip()
 
                 # Ensure we have at least one valid identifier (name, url, or hotel_id)
@@ -711,42 +785,62 @@ class RatingsTab(QWidget):
 
                 self.original_rows.append(row)
 
+                item = {
+                    'name': name,
+                    'city': city,
+                    'url': url,
+                    'source': 'search',
+                    'hotel_id': hotel_id,
+                    'mmt_id': mmt_id,
+                    'bcom_id': bcom_id,
+                    'address': address,
+                    'latitude': latitude,
+                    'longitude': longitude,
+                    'zipcode': zipcode
+                }
+
                 # Prioritization logic:
                 # 1. Hotel Name is present
                 if name and name.lower() not in ('name', 'hotel name', 'hotel'):
                     # Check if the URL column contains a specific platform link
                     if url and 'booking.com' in url.lower():
-                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'booking', 'hotel_id': hotel_id})
+                        item['source'] = 'booking'
                     elif url and 'makemytrip.com' in url.lower():
                         m = re.search(r'hotelId=(\w+)', url)
-                        hid = m.group(1) if m else hotel_id
-                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'mmt', 'hotel_id': hid})
+                        if m:
+                            item['hotel_id'] = m.group(1)
+                        item['source'] = 'mmt'
                     elif url and 'goibibo.com' in url.lower():
-                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'goibibo', 'hotel_id': hotel_id})
+                        item['source'] = 'goibibo'
                     elif url and 'agoda.com' in url.lower():
-                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'agoda', 'hotel_id': hotel_id})
+                        item['source'] = 'agoda'
                     elif url and 'expedia.com' in url.lower():
-                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'expedia', 'hotel_id': hotel_id})
+                        item['source'] = 'expedia'
                     else:
-                        # Default to search-by-name since name is present but no specific URL is detected
-                        self.items.append({'name': name, 'city': city, 'url': url, 'source': 'search', 'hotel_id': hotel_id})
+                        item['source'] = 'search'
+                    self.items.append(item)
 
                 # 2. Name is NOT present, but URL is present
                 elif url:
                     detected = detect_input_type(url)
                     extracted_name = detected.get('name') or url[:50]
+                    item['name'] = extracted_name
                     if detected['platform'] == 'mmt':
-                        hid = detected.get('hotel_id') or hotel_id
-                        self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': 'mmt', 'hotel_id': hid})
+                        item['hotel_id'] = detected.get('hotel_id') or hotel_id
+                        item['source'] = 'mmt'
                     elif detected['platform'] in ('booking', 'agoda', 'expedia', 'goibibo'):
-                        self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': detected['platform'], 'hotel_id': hotel_id})
+                        item['source'] = detected['platform']
                     else:
-                        self.items.append({'name': extracted_name, 'city': city, 'url': url, 'source': 'search', 'hotel_id': hotel_id})
+                        item['source'] = 'search'
+                    self.items.append(item)
 
                 # 3. Only ID is present
                 elif hotel_id:
                     clean_id = hotel_id.replace('#', '').strip()
-                    self.items.append({'name': clean_id, 'city': city, 'url': '', 'source': 'mmt', 'hotel_id': clean_id})
+                    item['name'] = clean_id
+                    item['source'] = 'mmt'
+                    item['hotel_id'] = clean_id
+                    self.items.append(item)
 
             has_links = sum(1 for i in self.items if i['url'] and 'http' in i['url'])
             names_only = len(self.items) - has_links
@@ -981,6 +1075,76 @@ class RatingsTab(QWidget):
 
         threading.Thread(target=login_thread, daemon=True).start()
 
+    def show_settings(self):
+        from settings_dialog import SettingsDialog
+        dialog = SettingsDialog(self, on_resume_callback=self.resume_ratings_run)
+        dialog.exec()
+
+    def resume_ratings_run(self, run_data):
+        input_file = run_data.get("input_file")
+        current_index = run_data.get("current_index", 0)
+        total_items = run_data.get("total_items", 0)
+        output_file = run_data.get("output_file")
+        
+        if not input_file or not os.path.exists(input_file):
+            self.log.append("Unable to resume: input file not found or is a manual text paste.")
+            return
+            
+        self.load_csv(input_file)
+        
+        existing_results = [None] * len(self.items)
+        if output_file and os.path.exists(output_file):
+            try:
+                with open(output_file, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    headers = next(reader)
+                    
+                    # find matching headers dynamically
+                    rating_idx = headers.index('Scraped_Rating') if 'Scraped_Rating' in headers else -1
+                    reviews_idx = headers.index('Scraped_Reviews') if 'Scraped_Reviews' in headers else -1
+                    source_idx = headers.index('Scraped_Source') if 'Scraped_Source' in headers else -1
+                    fail_idx = headers.index('Scraped_Fail_Reason') if 'Scraped_Fail_Reason' in headers else -1
+                    
+                    if rating_idx != -1 and reviews_idx != -1 and source_idx != -1:
+                        rows = list(reader)
+                        for idx in range(min(len(rows), len(self.items))):
+                            r_row = rows[idx]
+                            if idx < len(r_row):
+                                rating = r_row[rating_idx]
+                                reviews = r_row[reviews_idx]
+                                src = r_row[source_idx]
+                                fail_reason = r_row[fail_idx] if fail_idx != -1 and fail_idx < len(r_row) else ''
+                                if rating:
+                                    existing_results[idx] = {
+                                        'rating': rating,
+                                        'review_count': reviews,
+                                        'source': src,
+                                        'fail_reason': fail_reason
+                                    }
+            except Exception as e:
+                self.log.append(f"Failed to load existing results from output file for resume: {e}")
+                
+        self.start_btn.setEnabled(False)
+        self.browse_btn.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setMaximum(len(self.items))
+        done = sum(1 for r in existing_results if r is not None)
+        self.progress.setValue(done)
+        self.log.append(f"\nResuming run from index {current_index}...")
+        
+        self.worker = ScrapeWorker(
+            self.items, self.worker_spin.value(),
+            self.original_rows, self.original_headers,
+            existing_results=existing_results,
+            resume_output_path=output_file,
+            input_file=self.csv_path or input_file
+        )
+        self.worker.progress.connect(self.on_progress)
+        self.worker.finished.connect(self.on_finished)
+        self.worker.start()
+        self.pause_btn.setEnabled(True)
+        self.stop_btn.setEnabled(True)
+
 
 # ── ScrapeWorker (same as app.py, imported for reuse) ────
 
@@ -1068,6 +1232,18 @@ class ScrapeWorker(QThread):
             source = item.get('source', '')
             hotel_id = item.get('hotel_id', '')
             fail_reason = None
+            
+            import db_cache
+            identifier = url if url else f"{name}:{city}"
+            cached = db_cache.get_cached_rating(source or 'booking', identifier)
+            if cached:
+                return i, {
+                    'rating': cached['rating'] or 'N/A',
+                    'review_count': cached['review_count'] or 'N/A',
+                    'source': cached['scraped_source'],
+                    'fail_reason': 'Cached'
+                }
+
             try:
                 if source == 'mmt' and hotel_id:
                     rating, review_count = scrape_mmt_hotel(hotel_id)
@@ -1094,9 +1270,15 @@ class ScrapeWorker(QThread):
                         if page:
                             page.close()
                 elif source == 'booking' or (url and 'booking.com' in url):
-                    rating, review_count, fail_reason = scrape_hotel(url, name, city)
+                    addr = item.get('address', '')
+                    lat = item.get('latitude', '')
+                    lon = item.get('longitude', '')
+                    rating, review_count, fail_reason = scrape_hotel(url, name, city, address=addr, latitude=lat, longitude=lon)
                 else:
-                    rating, review_count, _, fail_reason = search_and_scrape(name, city)
+                    addr = item.get('address', '')
+                    lat = item.get('latitude', '')
+                    lon = item.get('longitude', '')
+                    rating, review_count, _, fail_reason = search_and_scrape(name, city, address=addr, latitude=lat, longitude=lon)
             except Exception as e:
                 rating, review_count = None, None
                 fail_reason = f'exception: {e}'
@@ -1111,6 +1293,13 @@ class ScrapeWorker(QThread):
                 src_label = 'Expedia'
             else:
                 src_label = 'Booking.com'
+
+            try:
+                db_cache.set_cached_rating(source or 'booking', identifier, rating, review_count, src_label)
+                db_cache.update_batch_run('ratings_batch', self.input_file or 'bulk_input', i + 1, total, 'RUNNING', output_path)
+            except Exception:
+                pass
+
             return i, {'rating': rating or 'N/A', 'review_count': review_count or 'N/A',
                        'source': src_label, 'fail_reason': fail_reason}
 
@@ -1214,6 +1403,50 @@ class ScrapeWorker(QThread):
                 status += f" • {eta_str}"
             self.progress.emit(processed_count[0], total, status)
 
+        # ---- ASYNC FAST-PATH ----
+        try:
+            import asyncio
+            from async_api_scraper import AsyncScraperEngine
+            
+            self.progress.emit(processed_count[0], total, f"Initiating high-speed API engine...")
+            scraper = AsyncScraperEngine(concurrency_limit=50)
+            
+            async_items = []
+            for i in list(remaining):
+                item = dict(self.items[i])
+                item['idx'] = i
+                async_items.append(item)
+                
+            if async_items:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                batch_results = loop.run_until_complete(scraper.scrape_batch(async_items))
+                loop.close()
+                
+                for res in batch_results:
+                    i = res.get('item_idx')
+                    if i is not None and res.get('rating') and res.get('reason') == 'ok':
+                        src_label = self.items[i].get('source', '').capitalize()
+                        if 'bcom' in src_label.lower() or 'booking' in src_label.lower(): src_label = 'Booking.com'
+                        if 'mmt' in src_label.lower(): src_label = 'MMT'
+                        
+                        final_res = {
+                            'rating': res['rating'],
+                            'review_count': res['review_count'],
+                            'source': src_label,
+                            'fail_reason': None
+                        }
+                        results[i] = final_res
+                        remaining.remove(i)
+                        processed_count[0] += 1
+                        emit_status(i, final_res)
+                        
+                        if processed_count[0] % SAVE_INTERVAL == 0:
+                            save_and_checkpoint()
+        except Exception as e:
+            print(f"Async Scrape Error: {e}")
+        # -------------------------
+
         # Split into parallel (non-CDP) and sequential (CDP) items
         # Goibibo and MMT both use connect_over_cdp which requires running on the exact same thread to avoid
         # cross-thread Playwright asyncio event loop conflicts, or at least sequential execution on a single worker thread.
@@ -1297,6 +1530,19 @@ class ScrapeWorker(QThread):
         save_incremental()
         if self.input_file:
             clear_checkpoint(self.input_file)
+
+        try:
+            import db_cache
+            db_cache.update_batch_run('ratings_batch', self.input_file or 'bulk_input', total, total, 'FINISHED', output_path)
+        except Exception:
+            pass
+
+        try:
+            from dashboard_generator import generate_ratings_report
+            html_path = output_path.replace('.csv', '_dashboard.html')
+            generate_ratings_report(output_path, html_path)
+        except Exception as d_err:
+            print(f"Error generating ratings dashboard: {d_err}")
 
         success = sum(1 for r in results if r and r['rating'] not in ('N/A', 'ERROR', 'CANCELLED'))
         self.finished.emit(output_path, success, total)

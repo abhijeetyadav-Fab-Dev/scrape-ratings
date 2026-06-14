@@ -9,7 +9,10 @@ Thin container that organises three independent scraper modules:
 """
 
 import sys, os, argparse
+import ctypes
 from pathlib import Path
+
+# AppUserModelID block removed to restore default icon grouping
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget,
@@ -82,8 +85,9 @@ class MainWindow(QMainWindow):
         # ── Floating AI Agent Overlay Corner Integration ───────────
         from agent_overlay import FloatingAgentWidget
         self.agent = FloatingAgentWidget(self, default_context="Ratings Scraper")
-        # Position floating in the bottom-right corner over the content pane
-        self.agent.setGeometry(600, 320, 320, 420)
+        # Position floating in the bottom-right corner over the content pane (starts minimized)
+        margin = 30
+        self.agent.setGeometry(950 - 180 - margin, 800 - 42 - margin, 180, 42)
         
         # Connect tab switches to update Agent's context dynamically
         self.tabs.currentChanged.connect(self._on_tab_changed)

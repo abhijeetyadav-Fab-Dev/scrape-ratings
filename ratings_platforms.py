@@ -44,15 +44,21 @@ _shared_cdp_pw = None
 def _get_headless_browser():
     """Get or create thread-local Playwright browser for headless scraping."""
     from playwright.sync_api import sync_playwright
+    import random
+    import time
     global _all_thread_browsers, _all_thread_pw_managers
     
     if not hasattr(_thread_local, 'pw_manager') or _thread_local.pw_manager is None:
+        # Prevent parallel threads from starting Playwright at the exact same millisecond
+        time.sleep(random.uniform(0.2, 1.8))
         pw = sync_playwright().start()
         _thread_local.pw_manager = pw
         with _browser_lock:
             _all_thread_pw_managers.append(pw)
             
     if not hasattr(_thread_local, 'browser') or _thread_local.browser is None or not _thread_local.browser.is_connected():
+        # Prevent parallel threads from launching Chromium at the exact same millisecond
+        time.sleep(random.uniform(0.1, 1.0))
         b = _thread_local.pw_manager.chromium.launch(
             headless=False,
             args=[
@@ -136,11 +142,44 @@ class RatingPlatform(ABC):
     def new_page(self):
         """Create a new page from the headless browser pool."""
         browser = _get_headless_browser()
+        
+        try:
+            from settings_dialog import load_settings
+            import random
+            import time
+            settings = load_settings()
+            ua = settings.get("user_agent", "").strip()
+            if not ua:
+                ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            
+            if settings.get("enable_jitter"):
+                time.sleep(random.uniform(settings.get("jitter_min", 1), settings.get("jitter_max", 3)))
+                
+            proxy_config = None
+            if settings.get("enable_proxies"):
+                proxies = [p.strip() for p in settings.get("proxy_list", "").split('\n') if p.strip()]
+                if proxies:
+                    sel = random.choice(proxies)
+                    proxy_config = {}
+                    if "@" in sel:
+                        proto_part, rest = sel.split("://") if "://" in sel else ("http", sel)
+                        up, hp = rest.split("@")
+                        u, p = up.split(":")
+                        proxy_config['server'] = f"{proto_part}://{hp}"
+                        proxy_config['username'] = u
+                        proxy_config['password'] = p
+                    else:
+                        proxy_config['server'] = sel
+        except Exception:
+            ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            proxy_config = None
+
         context = browser.new_context(
             viewport={'width': 1280, 'height': 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent=ua,
             locale="en-US",
-            timezone_id="Asia/Kolkata"
+            timezone_id="Asia/Kolkata",
+            proxy=proxy_config
         )
         page = context.new_page()
         page.set_extra_http_headers({
@@ -264,9 +303,14 @@ class BookingPlatform(RatingPlatform):
         match = re.match(r'(https://www\.booking\.com/hotel/[^?;]+)', url)
         return match.group(1) if match else url
 
-    def _search_hotel(self, page, hotel_name, city=""):
+    def _search_hotel(self, page, hotel_name, city="", address=""):
         """Search Booking.com for a hotel by name + city. Returns first matching URL or None."""
         query = f"{hotel_name} {city}".strip()
+        if address:
+            short_addr = ' '.join(address.split()[:4])
+            query = f"{hotel_name} {short_addr} {city}".strip()
+        elif not city and "india" not in hotel_name.lower():
+            query = f"{hotel_name} India"
         query_clean = re.sub(r'[^\w\s]', ' ', query).strip()
         search_url = f"https://www.booking.com/searchresults.en-gb.html?ss={query_clean.replace(' ', '+')}"
         page.goto(search_url, timeout=20000, wait_until="domcontentloaded")
@@ -331,14 +375,134 @@ class BookingPlatform(RatingPlatform):
             return rating, review_count, 'partial'
         return None, None, 'no_data'
 
+    def _validate_coordinates(self, page, target_lat, target_lon, max_distance_km=10.0) -> bool:
+        """
+        Validate if the loaded hotel page coordinates match the target lat/lon coordinates.
+        Distance threshold defaults to 10km (generous buffer for geographic verification).
+        """
+        try:
+            # Extract coordinates from page
+            coords = page.evaluate('''() => {
+                // 1. Check itemprop meta tags
+                let latMeta = document.querySelector('meta[itemprop="latitude"]');
+                let lonMeta = document.querySelector('meta[itemprop="longitude"]');
+                if (latMeta && lonMeta) {
+                    return {lat: latMeta.content, lon: lonMeta.content};
+                }
+                
+                // 2. Check data-atlas-latlng attribute
+                let mapEl = document.querySelector('[data-atlas-latlng]');
+                if (mapEl) {
+                    let parts = mapEl.getAttribute('data-atlas-latlng').split(',');
+                    if (parts.length === 2) {
+                        return {lat: parts[0], lon: parts[1]};
+                    }
+                }
+                
+                // 3. Check JSON-LD
+                for (let script of document.querySelectorAll('script[type="application/ld+json"]')) {
+                    try {
+                        let json = JSON.parse(script.textContent);
+                        if (json && json.geo) {
+                            return {lat: json.geo.latitude, lon: json.geo.longitude};
+                        }
+                    } catch(e) {}
+                }
+                
+                // 4. Try regex in script text
+                let match = document.body.innerHTML.match(/"latitude":\s*(-?\d+\.\d+),\s*"longitude":\s*(-?\d+\.\d+)/);
+                if (match) {
+                    return {lat: match[1], lon: match[2]};
+                }
+                
+                return null;
+            }''')
+            if not coords or not coords.get('lat') or not coords.get('lon'):
+                # If we cannot find coordinates, assume valid to avoid false-negatives
+                return True
+
+            lat1 = float(coords['lat'])
+            lon1 = float(coords['lon'])
+            lat2 = float(target_lat)
+            lon2 = float(target_lon)
+
+            # Haversine formula
+            import math
+            R = 6371.0 # Earth radius in km
+            dlat = math.radians(lat2 - lat1)
+            dlon = math.radians(lon2 - lon1)
+            a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+            distance = R * c
+            
+            print(f"Coordinates check: target ({lat2}, {lon2}) vs page ({lat1}, {lon1}) -> distance: {distance:.2f} km")
+            return distance <= max_distance_km
+        except Exception as e:
+            print(f"Error validating coordinates: {e}")
+            return True # Fallback to True to avoid stopping scrape on code exception
+
+    def _fetch_direct_fast(self, url: str) -> tuple:
+        """Attempt to fetch and extract ratings in < 0.5s using direct HTTP requests."""
+        import requests
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+            if resp.status_code == 200:
+                content = resp.text
+                rating, review_count = extract_rating_review_count(content, scale_10=True)
+                
+                # Check if it was a valid hotel page with data
+                if rating and review_count:
+                    # Parse coords quickly for coordinate validation
+                    coords = None
+                    import re
+                    lat_m = re.search(r'<meta[^>]*itemprop="latitude"[^>]*content="([^"]+)"', content)
+                    lon_m = re.search(r'<meta[^>]*itemprop="longitude"[^>]*content="([^"]+)"', content)
+                    if lat_m and lon_m:
+                        coords = {'lat': lat_m.group(1), 'lon': lon_m.group(1)}
+                    
+                    return rating, review_count, 'ok', coords
+        except Exception:
+            pass
+        return None, None, 'fast_failed', None
+
     def scrape(self, page, input_data: dict) -> tuple:
         url = input_data.get('url', '').strip()
         name = input_data.get('name', '')
         city = input_data.get('city', '')
+        address = input_data.get('address', '')
+        latitude = input_data.get('latitude', '')
+        longitude = input_data.get('longitude', '')
         fail_reason = 'unknown'
 
         if url and 'booking.com' in url:
             clean_url = self._clean_url(url)
+            
+            # 1. Try Insanely Fast Direct Scrape
+            f_rating, f_count, f_status, f_coords = self._fetch_direct_fast(clean_url)
+            if f_status == 'ok':
+                if latitude and longitude and f_coords:
+                    try:
+                        lat1, lon1 = float(f_coords['lat']), float(f_coords['lon'])
+                        lat2, lon2 = float(latitude), float(longitude)
+                        import math
+                        dlat = math.radians(lat2 - lat1)
+                        dlon = math.radians(lon2 - lon1)
+                        a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+                        distance = 6371.0 * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+                        if distance > 10.0:
+                            return None, None, 'location_mismatch'
+                    except Exception:
+                        pass
+                return f_rating, f_count, 'ok'
+
+            # 2. Fallback to Headless Browser
             try:
                 page.goto(clean_url, timeout=25000, wait_until="domcontentloaded")
                 page.wait_for_timeout(2000)
@@ -346,19 +510,25 @@ class BookingPlatform(RatingPlatform):
                 return None, None, 'timeout'
 
             if '/hotel/' in page.url:
+                if latitude and longitude:
+                    if not self._validate_coordinates(page, latitude, longitude):
+                        return None, None, 'location_mismatch'
                 rating, review_count, fail_reason = self._scrape_current_page(page)
             else:
                 fail_reason = 'redirected'
 
             if fail_reason == 'redirected' and name:
                 try:
-                    found_url = self._search_hotel(page, name, city)
+                    found_url = self._search_hotel(page, name, city, address=address)
                     if found_url:
                         if found_url.startswith('/'):
                             found_url = "https://www.booking.com" + found_url
                         clean_found = self._clean_url(found_url)
                         page.goto(clean_found, timeout=25000, wait_until="domcontentloaded")
                         page.wait_for_timeout(2000)
+                        if latitude and longitude:
+                            if not self._validate_coordinates(page, latitude, longitude):
+                                return None, None, 'location_mismatch'
                         rating, review_count, fail_reason = self._scrape_current_page(page)
                     else:
                         fail_reason = 'redirected_not_found'
@@ -369,16 +539,25 @@ class BookingPlatform(RatingPlatform):
 
             return rating, review_count, fail_reason
         else:
-            # Name-based search
+            # Name-based search fallback
             try:
-                found_url = self._search_hotel(page, name, city)
+                found_url = self._search_hotel(page, name, city, address=address)
                 if not found_url:
                     return None, None, 'not_found'
                 if found_url.startswith('/'):
                     found_url = "https://www.booking.com" + found_url
                 clean_url = self._clean_url(found_url)
+                
+                # Fast scrape on the found URL
+                f_rating, f_count, f_status, f_coords = self._fetch_direct_fast(clean_url)
+                if f_status == 'ok':
+                    return f_rating, f_count, 'ok'
+
                 page.goto(clean_url, timeout=25000, wait_until="domcontentloaded")
                 page.wait_for_timeout(2000)
+                if latitude and longitude:
+                    if not self._validate_coordinates(page, latitude, longitude):
+                        return None, None, 'location_mismatch'
                 rating, review_count, fail_reason = self._scrape_current_page(page)
                 return rating, review_count, fail_reason
             except Exception:
@@ -392,6 +571,8 @@ class BookingPlatform(RatingPlatform):
         city = input_data.get('city', '')
         if name:
             query = f"{name} {city}".strip()
+            if not city and "india" not in name.lower():
+                query = f"{name} India"
             query = re.sub(r'[^\w\s]', ' ', query).strip()
             return f"https://www.booking.com/searchresults.en-gb.html?ss={query.replace(' ', '+')}"
         return None
@@ -1078,7 +1259,7 @@ def search_booking_hotel(page, hotel_name, city=""):
     return None
 
 
-def scrape_hotel(url, name=None, city=None):
+def scrape_hotel(url, name=None, city=None, address=None, latitude=None, longitude=None):
     """Scrape a Booking.com hotel for rating and reviews."""
     plat = get_platform('booking')
     if not plat:
@@ -1086,7 +1267,8 @@ def scrape_hotel(url, name=None, city=None):
     page = plat.new_page()
     try:
         rating, review_count, fail_reason = plat.scrape(page, {
-            'url': url, 'name': name or '', 'city': city or ''
+            'url': url, 'name': name or '', 'city': city or '',
+            'address': address or '', 'latitude': latitude or '', 'longitude': longitude or ''
         })
         return rating, review_count, fail_reason
     finally:
@@ -1096,14 +1278,14 @@ def scrape_hotel(url, name=None, city=None):
             pass
 
 
-def search_and_scrape(hotel_name, city=""):
+def search_and_scrape(hotel_name, city="", address=None, latitude=None, longitude=None):
     """Search Booking.com by name and scrape."""
     plat = get_platform('booking')
     if not plat:
         return None, None, None, 'no_platform'
     page = plat.new_page()
     try:
-        found_url = plat._search_hotel(page, hotel_name, city)
+        found_url = plat._search_hotel(page, hotel_name, city, address=address)
         if not found_url:
             page.close()
             return None, None, None, 'not_found'
@@ -1116,6 +1298,10 @@ def search_and_scrape(hotel_name, city=""):
         except:
             page.close()
             return None, None, clean_url, 'timeout'
+        if latitude and longitude:
+            if not plat._validate_coordinates(page, latitude, longitude):
+                page.close()
+                return None, None, clean_url, 'location_mismatch'
         rating, review_count, fail_reason = plat._scrape_current_page(page)
         page.close()
         return rating, review_count, clean_url, fail_reason
