@@ -40,6 +40,45 @@ from ratings_platforms import (
 class PageScanner:
     """Core scanning engine — visits a page and detects all scrapeable data."""
 
+    def _get_cdp_page(self):
+        """Connect to real Chrome via CDP for Akamai-protected sites. Returns (page, True) or (None, False)."""
+        from playwright.sync_api import sync_playwright
+        import socket, subprocess, time as _time
+        from pathlib import Path
+        COOKIES_DIR = Path.home() / '.scrape-ratings'
+        COOKIES_DIR.mkdir(exist_ok=True)
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        res = sock.connect_ex(('127.0.0.1', 9222))
+        sock.close()
+        if res != 0:
+            chrome_paths = [
+                r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+                r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+                os.path.expandvars(r'%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe'),
+            ]
+            chrome = next((cp for cp in chrome_paths if os.path.exists(cp)), None)
+            if chrome:
+                user_data = str(COOKIES_DIR / 'chrome_scrape')
+                subprocess.Popen([
+                    chrome,
+                    '--remote-debugging-port=9222',
+                    f'--user-data-dir={user_data}',
+                    '--no-first-run',
+                    '--window-size=1280,800',
+                    'about:blank'
+                ])
+                _time.sleep(3)
+        try:
+            if not hasattr(self, '_cdp_pw') or self._cdp_pw is None:
+                self._cdp_pw = sync_playwright().start()
+            browser = self._cdp_pw.chromium.connect_over_cdp('http://127.0.0.1:9222')
+            context = browser.contexts[0]
+            page = context.new_page()
+            return page, True
+        except Exception:
+            return None, False
+
     def scan(self, url: str, timeout=30) -> dict:
         """
         Visit a URL and return a structured scan result.
@@ -56,11 +95,17 @@ class PageScanner:
             'links': [{'text': str, 'href': str}],
           }
         """
-        browser = _get_headless_browser()
-        page = browser.new_page()
-        page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        })
+        is_cdp = False
+        # Use CDP Chrome for MMT/Goibibo to bypass Akamai bot detection
+        if "makemytrip" in url.lower() or "goibibo" in url.lower():
+            page, is_cdp = self._get_cdp_page()
+        
+        if not is_cdp:
+            browser = _get_headless_browser()
+            page = browser.new_page()
+            page.set_extra_http_headers({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            })
 
         result = {
             'url': url,
@@ -76,7 +121,11 @@ class PageScanner:
 
         try:
             page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+            # MMT/Goibibo are React SPAs that need extra time to hydrate
+            if is_cdp:
+                page.wait_for_timeout(5000)
+            else:
+                page.wait_for_timeout(3000)
         except Exception as e:
             result['error'] = str(e)
             page.close()
