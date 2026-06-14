@@ -560,19 +560,64 @@ class GodModeWorker(QThread):
             async def _run_async():
                 import random
                 import asyncio
+                import socket, subprocess, time as _time
+                from pathlib import Path
                 from playwright.async_api import async_playwright
                 # Prevent parallel threads from launching chromium at the exact same millisecond
                 await asyncio.sleep(random.uniform(0.2, 2.0))
+
+                async def _get_cdp_browser(p):
+                    COOKIES_DIR = Path.home() / '.scrape-ratings'
+                    COOKIES_DIR.mkdir(exist_ok=True)
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    res = sock.connect_ex(('127.0.0.1', 9222))
+                    sock.close()
+                    if res != 0:
+                        chrome_paths = [
+                            r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+                            r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+                            os.path.expandvars(r'%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe'),
+                        ]
+                        chrome = next((cp for cp in chrome_paths if os.path.exists(cp)), None)
+                        if chrome:
+                            user_data = str(COOKIES_DIR / 'chrome_scrape')
+                            subprocess.Popen([
+                                chrome,
+                                '--remote-debugging-port=9222',
+                                f'--user-data-dir={user_data}',
+                                '--no-first-run',
+                                '--window-size=1280,800',
+                                'about:blank'
+                            ])
+                            _time.sleep(3)
+                    try:
+                        browser = await p.chromium.connect_over_cdp('http://127.0.0.1:9222')
+                        return browser, True  # browser, is_cdp
+                    except Exception:
+                        return None, False
+
                 async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=True)
-                    context = await browser.new_context(
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0"
-                    )
-                    # Block heavy items
-                    await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "font", "media") else route.continue_())
+                    is_cdp = False
+                    if "makemytrip" in url.lower() or "goibibo" in url.lower():
+                        browser, is_cdp = await _get_cdp_browser(p)
+                        if browser:
+                            context = browser.contexts[0]
+                        else:
+                            browser = await p.chromium.launch(headless=False, args=["--headless=new", "--disable-blink-features=AutomationControlled"])
+                            context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0")
+                    else:
+                        browser = await p.chromium.launch(headless=False, args=["--headless=new", "--disable-blink-features=AutomationControlled"])
+                        context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0")
+
+                    # Block heavy items (skip route on CDP shared context to avoid conflicts)
+                    if not is_cdp:
+                        await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "font", "media") else route.continue_())
                     page = await context.new_page()
                     page.set_default_timeout(25000)
                     await page.goto(url, wait_until="domcontentloaded")
+                    # Wait extra for JS-rendered pages like MMT
+                    if "makemytrip" in url.lower() or "goibibo" in url.lower():
+                        await page.wait_for_timeout(4000)
                     current_url = page.url.lower()
                     is_maps = "google.com/maps" in current_url or "maps.app.goo.gl" in current_url or "maps.google" in current_url or "/maps/" in current_url
                     if is_maps:
@@ -616,8 +661,9 @@ class GodModeWorker(QThread):
                             else:
                                 row[name] = ''
                     await page.close()
-                    await context.close()
-                    await browser.close()
+                    if not is_cdp:
+                        await context.close()
+                        await browser.close()
                     return idx, row
             try:
                 idx, row = asyncio.run(_run_async())
@@ -753,12 +799,47 @@ class BulkParallelFinderWorker(QThread):
                     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                     proxy_config = None
 
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(
-                    user_agent=ua,
-                    proxy=proxy_config
-                )
-                context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
+                # CDP logic for bulk finder
+                import socket, os, subprocess, time
+                from pathlib import Path
+                COOKIES_DIR = Path.home() / '.scrape-ratings'
+                COOKIES_DIR.mkdir(exist_ok=True)
+                
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                res = sock.connect_ex(('127.0.0.1', 9222))
+                sock.close()
+                if res != 0:
+                    chrome_paths = [
+                        r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+                        r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+                        os.path.expandvars(r'%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe'),
+                    ]
+                    chrome = next((path for path in chrome_paths if os.path.exists(path)), None)
+                    if chrome:
+                        user_data = str(COOKIES_DIR / 'chrome_scrape')
+                        subprocess.Popen([
+                            chrome,
+                            '--remote-debugging-port=9222',
+                            f'--user-data-dir={user_data}',
+                            '--no-first-run',
+                            '--window-size=1280,800',
+                            'about:blank'
+                        ])
+                        time.sleep(3)
+                        
+                try:
+                    browser = p.chromium.connect_over_cdp('http://127.0.0.1:9222')
+                    context = browser.contexts[0]
+                    is_cdp_bulk = True
+                except:
+                    browser = p.chromium.launch(headless=False, args=["--headless=new", "--disable-blink-features=AutomationControlled"])
+                    context = browser.new_context(
+                        user_agent=ua,
+                        proxy=proxy_config
+                    )
+                    is_cdp_bulk = False
+                if not is_cdp_bulk:
+                    context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
                 page = context.new_page()
             except Exception as e:
                 self.progress.emit(0, total, f"Failed to launch browser: {e}")
@@ -1117,7 +1198,7 @@ class BulkParallelFinderWorker(QThread):
                     pass
 
             try:
-                browser.close()
+                if not getattr(browser, 'is_cdp', False): browser.close()
             except Exception:
                 pass
 
@@ -1788,7 +1869,7 @@ class ParallelListingWorker(QThread):
                     self.progress.emit(f"Error scraping {platform.upper()}: {pe}")
 
             try:
-                browser.close()
+                if not getattr(browser, 'is_cdp', False): browser.close()
             except Exception:
                 pass
 
