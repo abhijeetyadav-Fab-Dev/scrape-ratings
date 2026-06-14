@@ -41,7 +41,7 @@ class PageScanner:
     """Core scanning engine — visits a page and detects all scrapeable data."""
 
     def _get_cdp_page(self):
-        """Connect to real Chrome via CDP for Akamai-protected sites. Returns (page, True) or (None, False)."""
+        """Connect to real Chrome via CDP for Akamai-protected sites. Returns (browser, page, True) or (None, None, False)."""
         from playwright.sync_api import sync_playwright
         import socket, subprocess, time as _time
         from pathlib import Path
@@ -75,9 +75,9 @@ class PageScanner:
             browser = self._cdp_pw.chromium.connect_over_cdp('http://127.0.0.1:9222')
             context = browser.contexts[0]
             page = context.new_page()
-            return page, True
+            return browser, page, True
         except Exception:
-            return None, False
+            return None, None, False
 
     def scan(self, url: str, timeout=30) -> dict:
         """
@@ -95,10 +95,11 @@ class PageScanner:
             'links': [{'text': str, 'href': str}],
           }
         """
+        browser_cdp = None
         is_cdp = False
         # Use CDP Chrome for MMT/Goibibo to bypass Akamai bot detection
         if "makemytrip" in url.lower() or "goibibo" in url.lower():
-            page, is_cdp = self._get_cdp_page()
+            browser_cdp, page, is_cdp = self._get_cdp_page()
         
         if not is_cdp:
             browser = _get_headless_browser()
@@ -327,6 +328,11 @@ class PageScanner:
             pass
 
         page.close()
+        if is_cdp and browser_cdp:
+            try:
+                browser_cdp.close()
+            except:
+                pass
         return result
 
 
@@ -710,7 +716,9 @@ class GodModeWorker(QThread):
                             else:
                                 row[name] = ''
                     await page.close()
-                    if not is_cdp:
+                    if is_cdp:
+                        await browser.close()
+                    else:
                         await context.close()
                         await browser.close()
                     return idx, row
@@ -1247,7 +1255,7 @@ class BulkParallelFinderWorker(QThread):
                     pass
 
             try:
-                if not getattr(browser, 'is_cdp', False): browser.close()
+                browser.close()
             except Exception:
                 pass
 
