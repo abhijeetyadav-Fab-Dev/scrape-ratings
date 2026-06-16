@@ -583,7 +583,7 @@ class BookingPlatform(RatingPlatform):
 class MMTPlatform(RatingPlatform):
     name = "MakeMyTrip"
     short_name = "mmt"
-    supports_headless = False
+    supports_headless = True
     needs_login = True
     scale = "/5"
     accepts = ['url', 'id']
@@ -678,6 +678,8 @@ class MMTPlatform(RatingPlatform):
                         chrome,
                         "--remote-debugging-port=9222",
                         f"--user-data-dir={user_data}",
+                        "--headless=new",
+                        "--disable-gpu",
                         "--no-first-run",
                         "--window-size=1280,800",
                         "about:blank"

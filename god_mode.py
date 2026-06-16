@@ -64,6 +64,8 @@ class PageScanner:
                     chrome,
                     '--remote-debugging-port=9222',
                     f'--user-data-dir={user_data}',
+                    '--headless=new',
+                    '--disable-gpu',
                     '--no-first-run',
                     '--window-size=1280,800',
                     'about:blank'
@@ -640,6 +642,8 @@ class GodModeWorker(QThread):
                                 chrome,
                                 '--remote-debugging-port=9222',
                                 f'--user-data-dir={user_data}',
+                                '--headless=new',
+                                '--disable-gpu',
                                 '--no-first-run',
                                 '--window-size=1280,800',
                                 'about:blank'
@@ -878,6 +882,8 @@ class BulkParallelFinderWorker(QThread):
                             chrome,
                             '--remote-debugging-port=9222',
                             f'--user-data-dir={user_data}',
+                            '--headless=new',
+                            '--disable-gpu',
                             '--no-first-run',
                             '--window-size=1280,800',
                             'about:blank'
