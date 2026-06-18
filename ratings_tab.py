@@ -1428,7 +1428,10 @@ class ScrapeWorker(QThread):
                     if i is not None and res.get('rating') and res.get('reason') == 'ok':
                         src_label = self.items[i].get('source', '').capitalize()
                         if 'bcom' in src_label.lower() or 'booking' in src_label.lower(): src_label = 'Booking.com'
-                        if 'mmt' in src_label.lower(): src_label = 'MMT'
+                        elif 'mmt' in src_label.lower() or 'makemytrip' in src_label.lower(): src_label = 'MMT'
+                        elif 'goibibo' in src_label.lower(): src_label = 'Goibibo'
+                        elif 'agoda' in src_label.lower(): src_label = 'Agoda'
+                        elif 'expedia' in src_label.lower(): src_label = 'Expedia'
                         
                         final_res = {
                             'rating': res['rating'],

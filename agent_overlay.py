@@ -365,25 +365,55 @@ class DeepResearchWorker(threading.Thread):
                 for orig_href, decoded_href, expected_plat in filtered_candidates:
                     self.signals.log.emit(f"  🔗 Resolving redirect for: {decoded_href[:60]}...")
                     resolved_url = decoded_href
+                    html_content = ""
+                    
+                    # Try resolving redirect using curl_cffi first (super fast and bypasses most blocks)
                     try:
-                        page.goto(decoded_href, timeout=25000, wait_until="load")
-                        try:
-                            page.wait_for_load_state("networkidle", timeout=5000)
-                        except:
-                            pass
-                        resolved_url = page.url
+                        from curl_cffi import requests as curl_requests
+                        from curl_cffi.const import CurlHttpVersion
+                        
+                        headers = {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                            "Accept-Language": "en-US,en;q=0.5",
+                        }
+                        # We use HTTP/1.1 for MMT / Goibibo to bypass potential Akamai HTTP/2 stream errors
+                        http_ver = CurlHttpVersion.V1_1 if 'makemytrip' in decoded_href or 'goibibo' in decoded_href else CurlHttpVersion.NONE
+                        
+                        r_res = curl_requests.get(
+                            decoded_href,
+                            headers=headers,
+                            http_version=http_ver,
+                            timeout=10,
+                            allow_redirects=True,
+                            impersonate="chrome120"
+                        )
+                        resolved_url = r_res.url
+                        html_content = r_res.text
                     except Exception as e:
-                        self.signals.log.emit(f"  ⚠️ Redirect resolution page.goto failed: {e}")
-                        if orig_href != decoded_href:
+                        self.signals.log.emit(f"  ⚠️ Redirect resolution via curl_cffi failed: {e}")
+                        # Fallback to Playwright page.goto if curl_cffi fails
+                        try:
+                            page.goto(decoded_href, timeout=20000, wait_until="load")
                             try:
-                                page.goto(orig_href, timeout=25000, wait_until="load")
+                                page.wait_for_load_state("networkidle", timeout=3000)
+                            except:
+                                pass
+                            resolved_url = page.url
+                            html_content = page.content()
+                        except Exception as e2:
+                            self.signals.log.emit(f"  ⚠️ Redirect resolution fallback failed: {e2}")
+                            if orig_href != decoded_href:
                                 try:
-                                    page.wait_for_load_state("networkidle", timeout=5000)
-                                except:
-                                    pass
-                                resolved_url = page.url
-                            except Exception as e2:
-                                self.signals.log.emit(f"  ⚠️ Redirect resolution orig_href page.goto failed: {e2}")
+                                    page.goto(orig_href, timeout=20000, wait_until="load")
+                                    try:
+                                        page.wait_for_load_state("networkidle", timeout=3000)
+                                    except:
+                                        pass
+                                    resolved_url = page.url
+                                    html_content = page.content()
+                                except Exception as e3:
+                                    self.signals.log.emit(f"  ⚠️ Redirect resolution orig_href fallback failed: {e3}")
                     
                     # Verify resolved URL matches domain patterns
                     final_plat = None
@@ -408,12 +438,55 @@ class DeepResearchWorker(threading.Thread):
                     # ── COORDINATE VERDICT ──
                     coord_passed = None
                     if target_lat_val is not None and target_lng_val is not None:
-                        try:
-                            page.evaluate("window.scrollBy(0, 400)")
-                            page.wait_for_timeout(1000)
-                        except:
-                            pass
-                        cand_lat, cand_lng = extract_coordinates(page)
+                        cand_lat, cand_lng = None, None
+                        
+                        # 1. Try to extract coordinates directly from html fetched via curl_cffi
+                        if html_content:
+                            try:
+                                lat_m = re.search(r'b_map_center_latitude\s*=\s*([\d.\-]+)', html_content)
+                                lng_m = re.search(r'b_map_center_longitude\s*=\s*([\d.\-]+)', html_content)
+                                if lat_m and lng_m:
+                                    cand_lat, cand_lng = float(lat_m.group(1)), float(lng_m.group(1))
+                                
+                                if cand_lat is None:
+                                    lat_meta = re.search(r'<meta[^>]*itemprop="latitude"[^>]*content="([^"]+)"', html_content)
+                                    lon_meta = re.search(r'<meta[^>]*itemprop="longitude"[^>]*content="([^"]+)"', html_content)
+                                    if lat_meta and lon_meta:
+                                        cand_lat, cand_lng = float(lat_meta.group(1)), float(lon_meta.group(1))
+                                        
+                                if cand_lat is None:
+                                    atlas_m = re.search(r'data-atlas-latlng="([^"]+)"', html_content)
+                                    if atlas_m:
+                                        parts = atlas_m.group(1).split(',')
+                                        if len(parts) == 2:
+                                            cand_lat, cand_lng = float(parts[0]), float(parts[1])
+                                            
+                                if cand_lat is None:
+                                    ld_geo = re.findall(r'"geo"\s*:\s*\{\s*"@type"\s*:\s*"GeoCoordinates"\s*,\s*"latitude"\s*:\s*"([^"]+)"\s*,\s*"longitude"\s*:\s*"([^"]+)"', html_content)
+                                    if ld_geo:
+                                        cand_lat, cand_lng = float(ld_geo[0][0]), float(ld_geo[0][1])
+                                        
+                                if cand_lat is None:
+                                    lat_lon_m = re.search(r'"latitude":\s*(-?\d+\.\d+),\s*"longitude":\s*(-?\d+\.\d+)', html_content)
+                                    if lat_lon_m:
+                                        cand_lat, cand_lng = float(lat_lon_m.group(1)), float(lat_lon_m.group(2))
+                            except Exception as ce:
+                                self.signals.log.emit(f"    ⚠️ Failed to parse coordinates from html: {ce}")
+                        
+                        # 2. Fallback to Playwright if coordinates not extracted from static html
+                        if cand_lat is None or cand_lng is None:
+                            try:
+                                if page.url != resolved_url:
+                                    page.goto(resolved_url, timeout=20000, wait_until="domcontentloaded")
+                                try:
+                                    page.evaluate("window.scrollBy(0, 400)")
+                                    page.wait_for_timeout(1000)
+                                except:
+                                    pass
+                                cand_lat, cand_lng = extract_coordinates(page)
+                            except Exception as e:
+                                self.signals.log.emit(f"    ⚠️ Fallback coordinates extraction failed: {e}")
+
                         if cand_lat is not None and cand_lng is not None:
                             dist_km = get_distance_km(target_lat_val, target_lng_val, cand_lat, cand_lng)
                             if dist_km is not None:
