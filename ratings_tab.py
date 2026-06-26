@@ -695,7 +695,12 @@ class RatingsTab(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to save CSV:\n{e}")
 
     def browse_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select CSV", "", "CSV Files (*.csv)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Input File", 
+            "", 
+            "Supported Files (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls)"
+        )
         if path:
             self.load_csv(path)
 
@@ -705,8 +710,30 @@ class RatingsTab(QWidget):
         self.original_rows = []
         self.original_headers = []
         try:
-            with open(path, newline='', encoding='utf-8') as f:
-                rows = list(csv.reader(f))
+            if path.lower().endswith(('.xlsx', '.xls')):
+                rows = []
+                try:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(path, data_only=True)
+                    ws = wb.active
+                    for r in ws.iter_rows(values_only=True):
+                        # Convert None to empty string, and convert other values to string to mimic csv.reader
+                        row_vals = [str(cell) if cell is not None else '' for cell in r]
+                        rows.append(row_vals)
+                    wb.close()
+                except Exception as ex:
+                    try:
+                        import pandas as pd
+                        df = pd.read_excel(path)
+                        headers = [str(c) for c in df.columns]
+                        rows = [headers]
+                        for r in df.values:
+                            rows.append([str(c) if pd.notna(c) else '' for c in r])
+                    except Exception as ex2:
+                        raise Exception(f"Failed to read Excel file: {ex} (pandas fallback error: {ex2})")
+            else:
+                with open(path, newline='', encoding='utf-8') as f:
+                    rows = list(csv.reader(f))
 
             header_idx = 0
             headers = []
@@ -1194,6 +1221,14 @@ class ScrapeWorker(QThread):
             return f"~{hours}h {mins}m remaining"
 
     def run(self):
+        import time
+        import os
+        import csv
+        from pathlib import Path
+        import asyncio
+        from async_api_scraper import AsyncScraperEngine
+        import db_cache
+
         total = len(self.items)
         SAVE_INTERVAL = 50
         start_time = time.time()
@@ -1209,164 +1244,110 @@ class ScrapeWorker(QThread):
             results = [None] * total
             processed_count = [0]
             if self.input_file:
-                stem = Path(self.input_file).stem
-                output_path = str(Path.home() / "Downloads" / f"{stem}_scraped.csv")
+                path_obj = Path(self.input_file)
+                stem = path_obj.stem
+                ext = path_obj.suffix.lower()
+                if ext in ['.xlsx', '.xls']:
+                    output_path = str(Path.home() / "Downloads" / f"{stem}_scraped.xlsx")
+                else:
+                    output_path = str(Path.home() / "Downloads" / f"{stem}_scraped.csv")
             else:
                 output_path = str(Path.home() / "Downloads" / f"ratings_output_{int(time.time())}.csv")
             remaining = set(range(total))
-            if self.original_rows and self.original_headers:
-                out_headers = self.original_headers + ['Scraped_Rating', 'Scraped_Reviews', 'Scraped_Source']
-                with open(output_path, 'w', newline='', encoding='utf-8') as f:
-                    csv.writer(f).writerow(out_headers)
-            else:
-                with open(output_path, 'w', newline='', encoding='utf-8') as f:
-                    w = csv.DictWriter(f, fieldnames=['name', 'city', 'url', 'rating', 'review_count', 'source'])
-                    w.writeheader()
-
-        def scrape_one(i, item):
-            if self._stop:
-                return i, None
-            url = item.get('url', '').strip()
-            name = item.get('name', '')
-            city = item.get('city', '')
-            source = item.get('source', '')
-            hotel_id = item.get('hotel_id', '')
-            fail_reason = None
             
-            import db_cache
-            identifier = url if url else f"{name}:{city}"
-            cached = db_cache.get_cached_rating(source or 'booking', identifier)
-            if cached:
-                return i, {
-                    'rating': cached['rating'] or 'N/A',
-                    'review_count': cached['review_count'] or 'N/A',
-                    'source': cached['scraped_source'],
-                    'fail_reason': 'Cached'
-                }
-
-            try:
-                if source == 'mmt' and hotel_id:
-                    rating, review_count = scrape_mmt_hotel(hotel_id)
-                elif source == 'mmt' and url and 'makemytrip' in url:
-                    m = re.search(r'hotelId=(\w+)', url)
-                    if m:
-                        rating, review_count = scrape_mmt_hotel(m.group(1))
-                    else:
-                        rating, review_count = None, None
-                elif source == 'goibibo' and url:
-                    rating, review_count = scrape_goibibo_hotel(url, name, city)
-                elif source in ('agoda', 'expedia') and url:
-                    page = None
-                    try:
-                        browser = _get_headless_browser()
-                        page = browser.new_page()
-                        page.goto(url, timeout=25000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(3000)
-                        content = page.content()
-                        rating, review_count = extract_rating_review_count(content, scale_10=True)
-                    except:
-                        rating, review_count = None, None
-                    finally:
-                        if page:
-                            page.close()
-                elif source == 'booking' or (url and 'booking.com' in url):
-                    addr = item.get('address', '')
-                    lat = item.get('latitude', '')
-                    lon = item.get('longitude', '')
-                    rating, review_count, fail_reason = scrape_hotel(url, name, city, address=addr, latitude=lat, longitude=lon)
+            if not output_path.endswith('.xlsx'):
+                if self.original_rows and self.original_headers:
+                    out_headers = self.original_headers + ['Scraped_Rating', 'Scraped_Reviews', 'Scraped_Source', 'Scraped_Fail_Reason']
+                    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                        csv.writer(f).writerow(out_headers)
                 else:
-                    addr = item.get('address', '')
-                    lat = item.get('latitude', '')
-                    lon = item.get('longitude', '')
-                    rating, review_count, _, fail_reason = search_and_scrape(name, city, address=addr, latitude=lat, longitude=lon)
-            except Exception as e:
-                rating, review_count = None, None
-                fail_reason = f'exception: {e}'
-
-            if source == 'mmt':
-                src_label = 'MMT'
-            elif source == 'goibibo':
-                src_label = 'Goibibo'
-            elif source == 'agoda':
-                src_label = 'Agoda'
-            elif source == 'expedia':
-                src_label = 'Expedia'
-            else:
-                src_label = 'Booking.com'
-
-            try:
-                db_cache.set_cached_rating(source or 'booking', identifier, rating, review_count, src_label)
-                db_cache.update_batch_run('ratings_batch', self.input_file or 'bulk_input', i + 1, total, 'RUNNING', output_path)
-            except Exception:
-                pass
-
-            return i, {'rating': rating or 'N/A', 'review_count': review_count or 'N/A',
-                       'source': src_label, 'fail_reason': fail_reason}
+                    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                        w = csv.DictWriter(f, fieldnames=['name', 'city', 'url', 'rating', 'review_count', 'source', 'fail_reason'])
+                        w.writeheader()
 
         def save_incremental():
-            with open(output_path + '.tmp', 'w', newline='', encoding='utf-8') as f:
+            is_excel = output_path.endswith('.xlsx')
+            if is_excel:
+                import openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
                 if self.original_rows and self.original_headers:
                     new_cols = ['Scraped_Rating', 'Scraped_Reviews', 'Scraped_Source', 'Scraped_Fail_Reason']
                     out_headers = list(self.original_headers)
-                    lower_orig = [h.lower() for h in self.original_headers]
+                    lower_orig = [str(h).lower() for h in self.original_headers]
                     col_indices = {}
-                    
                     for col in new_cols:
                         try:
                             col_indices[col] = lower_orig.index(col.lower())
                         except ValueError:
                             col_indices[col] = None
-                            
-                    for col in new_cols:
-                        if col_indices[col] is None:
                             out_headers.append(col)
-                            
-                    writer = csv.writer(f)
-                    writer.writerow(out_headers)
+                    ws.append(out_headers)
                     for idx, orig_row in enumerate(self.original_rows):
                         r = results[idx] if idx < len(results) and results[idx] else {
                             'rating': '', 'review_count': '', 'source': '', 'fail_reason': ''
                         }
                         out_row = list(orig_row)
-                        
-                        # Add rating
-                        if col_indices['Scraped_Rating'] is not None:
-                            out_row[col_indices['Scraped_Rating']] = r['rating']
-                        else:
-                            out_row.append(r['rating'])
-                            
-                        # Add reviews
-                        if col_indices['Scraped_Reviews'] is not None:
-                            out_row[col_indices['Scraped_Reviews']] = r['review_count']
-                        else:
-                            out_row.append(r['review_count'])
-                            
-                        # Add source
-                        if col_indices['Scraped_Source'] is not None:
-                            out_row[col_indices['Scraped_Source']] = r['source']
-                        else:
-                            out_row.append(r['source'])
-                            
-                        # Add fail_reason
-                        if col_indices['Scraped_Fail_Reason'] is not None:
-                            out_row[col_indices['Scraped_Fail_Reason']] = r['fail_reason'] or ''
-                        else:
-                            out_row.append(r['fail_reason'] or '')
-                            
-                        writer.writerow(out_row)
+                        for col in new_cols:
+                            key = 'review_count' if col == 'Scraped_Reviews' else col.replace('Scraped_', '').lower()
+                            val = r.get(key, '')
+                            if col_indices[col] is not None:
+                                out_row[col_indices[col]] = val
+                            else:
+                                out_row.append(val)
+                        ws.append(out_row)
                 else:
-                    writer = csv.DictWriter(f, fieldnames=[
-                        'name', 'city', 'url', 'rating', 'review_count', 'source', 'fail_reason'
-                    ])
-                    writer.writeheader()
+                    ws.append(['name', 'city', 'url', 'rating', 'review_count', 'source', 'fail_reason'])
                     for idx, item in enumerate(self.items):
-                        r = results[idx] if results[idx] else {
+                        r = results[idx] if idx < len(results) and results[idx] else {
                             'rating': 'N/A', 'review_count': 'N/A', 'source': '', 'fail_reason': ''
                         }
-                        writer.writerow({
-                            'name': item.get('name', ''), 'city': item.get('city', ''),
-                            'url': item.get('url', ''), **r
-                        })
+                        ws.append([
+                            item.get('name', ''), item.get('city', ''), item.get('url', ''),
+                            r.get('rating', 'N/A'), r.get('review_count', 'N/A'), r.get('source', ''), r.get('fail_reason', '')
+                        ])
+                wb.save(output_path + '.tmp')
+            else:
+                with open(output_path + '.tmp', 'w', newline='', encoding='utf-8') as f:
+                    if self.original_rows and self.original_headers:
+                        new_cols = ['Scraped_Rating', 'Scraped_Reviews', 'Scraped_Source', 'Scraped_Fail_Reason']
+                        out_headers = list(self.original_headers)
+                        lower_orig = [str(h).lower() for h in self.original_headers]
+                        col_indices = {}
+                        for col in new_cols:
+                            try:
+                                col_indices[col] = lower_orig.index(col.lower())
+                            except ValueError:
+                                col_indices[col] = None
+                                out_headers.append(col)
+                        writer = csv.writer(f)
+                        writer.writerow(out_headers)
+                        for idx, orig_row in enumerate(self.original_rows):
+                            r = results[idx] if idx < len(results) and results[idx] else {
+                                'rating': '', 'review_count': '', 'source': '', 'fail_reason': ''
+                            }
+                            out_row = list(orig_row)
+                            for col in new_cols:
+                                key = 'review_count' if col == 'Scraped_Reviews' else col.replace('Scraped_', '').lower()
+                                val = r.get(key, '')
+                                if col_indices[col] is not None:
+                                    out_row[col_indices[col]] = val
+                                else:
+                                    out_row.append(val)
+                            writer.writerow(out_row)
+                    else:
+                        writer = csv.DictWriter(f, fieldnames=[
+                            'name', 'city', 'url', 'rating', 'review_count', 'source', 'fail_reason'
+                        ])
+                        writer.writeheader()
+                        for idx, item in enumerate(self.items):
+                            r = results[idx] if idx < len(results) and results[idx] else {
+                                'rating': 'N/A', 'review_count': 'N/A', 'source': '', 'fail_reason': ''
+                            }
+                            writer.writerow({
+                                'name': item.get('name', ''), 'city': item.get('city', ''),
+                                'url': item.get('url', ''), **r
+                            })
             if os.path.exists(output_path):
                 os.remove(output_path)
             os.rename(output_path + '.tmp', output_path)
@@ -1374,58 +1355,67 @@ class ScrapeWorker(QThread):
         def save_and_checkpoint():
             save_incremental()
             if self.input_file:
+                from db_cache import save_checkpoint
                 save_checkpoint(self.input_file, output_path, results, total, processed_count[0])
 
         def emit_status(i, result):
             item = self.items[i]
-            src = item.get('source', '')
             eta_str = self._format_eta(time.time() - start_time, processed_count[0], total)
             rating_str = result.get('rating', 'N/A') if result else 'N/A'
             reviews_str = result.get('review_count', 'N/A') if result else 'N/A'
             fail_reason = result.get('fail_reason') if result else None
-            if rating_str == 'N/A' and fail_reason:
-                reason_labels = {
-                    'redirected': 'Redirected',
-                    'redirected_not_found': 'Redirected (no fallback match)',
-                    'redirected_search_error': 'Redirected (search failed)',
-                    'no_data': 'No rating data on page',
-                    'timeout': 'Page load timeout',
-                    'not_found': 'Hotel not found',
-                    'no_id': 'No hotel ID provided',
-                    'browser_error': 'Browser connection error',
-                    'exception': 'Scraping error',
-                }
-                label = reason_labels.get(fail_reason, fail_reason)
-                status = f"{item.get('name', '')[:35]} -> [{label}]"
+            if str(rating_str).strip() in ('N/A', '') and fail_reason:
+                status = f"{item.get('name', '')[:35]} -> [{fail_reason}]"
             else:
                 status = f"{item.get('name', '')[:35]} -> Rating: {rating_str}, Reviews: {reviews_str}"
             if eta_str:
                 status += f" • {eta_str}"
             self.progress.emit(processed_count[0], total, status)
 
-        # ---- ASYNC FAST-PATH ----
         try:
-            import asyncio
-            from async_api_scraper import AsyncScraperEngine
-            
             self.progress.emit(processed_count[0], total, f"Initiating high-speed API engine...")
             scraper = AsyncScraperEngine(concurrency_limit=50)
             
             async_items = []
             for i in list(remaining):
+                if self._stop:
+                    break
                 item = dict(self.items[i])
+                url = item.get('url', '').strip()
+                name = item.get('name', '')
+                city = item.get('city', '')
+                source = item.get('source', '')
+                identifier = url if url else f"{name}:{city}"
+                
+                cached = db_cache.get_cached_rating(source or 'booking', identifier)
+                if cached:
+                    final_res = {
+                        'rating': cached['rating'] or 'N/A',
+                        'review_count': cached['review_count'] or 'N/A',
+                        'source': cached['scraped_source'],
+                        'fail_reason': 'Cached'
+                    }
+                    results[i] = final_res
+                    remaining.discard(i)
+                    processed_count[0] += 1
+                    emit_status(i, final_res)
+                    continue
+                
                 item['idx'] = i
+                item['identifier'] = identifier
                 async_items.append(item)
                 
-            if async_items:
+            if async_items and not self._stop:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 batch_results = loop.run_until_complete(scraper.scrape_batch(async_items))
                 loop.close()
                 
                 for res in batch_results:
+                    if self._stop:
+                        break
                     i = res.get('item_idx')
-                    if i is not None and res.get('rating') and res.get('reason') == 'ok':
+                    if i is not None:
                         src_label = self.items[i].get('source', '').capitalize()
                         if 'bcom' in src_label.lower() or 'booking' in src_label.lower(): src_label = 'Booking.com'
                         elif 'mmt' in src_label.lower() or 'makemytrip' in src_label.lower(): src_label = 'MMT'
@@ -1433,119 +1423,43 @@ class ScrapeWorker(QThread):
                         elif 'agoda' in src_label.lower(): src_label = 'Agoda'
                         elif 'expedia' in src_label.lower(): src_label = 'Expedia'
                         
+                        rating_val = res.get('rating')
+                        if rating_val is None or str(rating_val).strip() == '':
+                            rating_val = 'N/A'
+                        rc_val = res.get('review_count')
+                        if rc_val is None or str(rc_val).strip() == '':
+                            rc_val = 'N/A'
+                            
                         final_res = {
-                            'rating': res['rating'],
-                            'review_count': res['review_count'],
+                            'rating': rating_val,
+                            'review_count': rc_val,
                             'source': src_label,
-                            'fail_reason': None
+                            'fail_reason': res.get('reason') if str(rating_val) == 'N/A' else None
                         }
+                        
+                        try:
+                            identifier = self.items[i].get('identifier')
+                            db_cache.set_cached_rating(self.items[i].get('source') or 'booking', identifier, res.get('rating'), res.get('review_count'), src_label)
+                            db_cache.update_batch_run('ratings_batch', self.input_file or 'bulk_input', processed_count[0], total, 'RUNNING', output_path)
+                        except Exception as e:
+                            pass
+                            
                         results[i] = final_res
-                        remaining.remove(i)
+                        remaining.discard(i)
                         processed_count[0] += 1
                         emit_status(i, final_res)
                         
                         if processed_count[0] % SAVE_INTERVAL == 0:
                             save_and_checkpoint()
+
         except Exception as e:
             print(f"Async Scrape Error: {e}")
-        # -------------------------
 
-        # Split into parallel (non-CDP) and sequential (CDP) items
-        # Goibibo and MMT both use connect_over_cdp which requires running on the exact same thread to avoid
-        # cross-thread Playwright asyncio event loop conflicts, or at least sequential execution on a single worker thread.
-        cdp_indices = [
-            i for i in range(total)
-            if i in remaining
-            and self.items[i].get('source') in ('mmt', 'goibibo')
-        ]
-        non_cdp_indices = [
-            i for i in range(total)
-            if i in remaining
-            and self.items[i].get('source') not in ('mmt', 'goibibo')
-        ]
+        save_and_checkpoint()
+        if not self._stop:
+            try:
+                db_cache.update_batch_run('ratings_batch', self.input_file or 'bulk_input', total, total, 'COMPLETED', output_path)
+            except Exception:
+                pass
+            self.finished.emit(output_path, processed_count[0], total)
 
-        # Process non-CDP items (Booking, Agoda, Expedia) in parallel using headless browser threads
-        if non_cdp_indices:
-            pending = set()
-            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                futures = {executor.submit(scrape_one, i, self.items[i]): i
-                           for i in non_cdp_indices}
-                pending = set(futures.keys())
-                pause_start = None
-                for future in as_completed(futures):
-                    pending.discard(future)
-                    if self._stop:
-                        for f in pending:
-                            f.cancel()
-                        break
-                    while self._pause and not self._stop:
-                        if pause_start is None:
-                            pause_start = time.time()
-                        time.sleep(0.5)
-                    if pause_start is not None:
-                        start_time += time.time() - pause_start
-                        pause_start = None
-                    if self._stop:
-                        for f in pending:
-                            f.cancel()
-                        break
-                    i, result = future.result()
-                    results[i] = result
-                    processed_count[0] += 1
-                    emit_status(i, result or {
-                        'rating': 'CANCELLED', 'review_count': '', 'source': ''
-                    })
-                    if processed_count[0] % SAVE_INTERVAL == 0:
-                        save_and_checkpoint()
-
-        # Process CDP items sequentially in a dedicated single thread pool executor to maintain strict thread affinity for CDP connections
-        if cdp_indices and not self._stop:
-            pause_start = None
-            with ThreadPoolExecutor(max_workers=1) as cdp_executor:
-                # We submit each CDP scrape sequentially to guarantee they all execute on the exact same worker thread
-                for i in cdp_indices:
-                    if self._stop:
-                        break
-                    while self._pause:
-                        if pause_start is None:
-                            pause_start = time.time()
-                        time.sleep(0.5)
-                        if self._stop:
-                            break
-                    if pause_start is not None:
-                        start_time += time.time() - pause_start
-                        pause_start = None
-                    
-                    future = cdp_executor.submit(scrape_one, i, self.items[i])
-                    try:
-                        i, result = future.result()
-                    except Exception as e:
-                        result = {'rating': 'N/A', 'review_count': 'N/A', 'source': self.items[i].get('source', ''), 'fail_reason': f'exception: {e}'}
-                    
-                    results[i] = result
-                    processed_count[0] += 1
-                    emit_status(i, result or {
-                        'rating': 'CANCELLED', 'review_count': '', 'source': ''
-                    })
-                    if processed_count[0] % SAVE_INTERVAL == 0:
-                        save_and_checkpoint()
-
-        save_incremental()
-        if self.input_file:
-            clear_checkpoint(self.input_file)
-
-        try:
-            import db_cache
-            db_cache.update_batch_run('ratings_batch', self.input_file or 'bulk_input', total, total, 'FINISHED', output_path)
-        except Exception:
-            pass
-
-        try:
-            from dashboard_generator import generate_ratings_report
-            html_path = output_path.replace('.csv', '_dashboard.html')
-            generate_ratings_report(output_path, html_path)
-        except Exception as d_err:
-            print(f"Error generating ratings dashboard: {d_err}")
-
-        success = sum(1 for r in results if r and r['rating'] not in ('N/A', 'ERROR', 'CANCELLED'))
-        self.finished.emit(output_path, success, total)

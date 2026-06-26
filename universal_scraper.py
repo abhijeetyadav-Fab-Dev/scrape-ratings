@@ -776,6 +776,61 @@ class BookingExtranetSource(ExtranetSource):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_timeout(1000)
 
+    def _fast_regex_extract(self, html: str, url: str, field_keys: list[str], section: str) -> list[dict]:
+        """
+        Fast Regex parsing for Booking.com Extranet.
+        Matches exact HTML structure from the endpoints.
+        """
+        row = {}
+        if section == "reviews":
+            if "guest reviews" in html.lower():
+                ms = re.search(r'bui-review-score__badge">\s*([\d.]+)\s*<', html)
+                mc = re.search(r'based on\s*([\d,]+)\s*reviews?', html, re.IGNORECASE)
+                if "rev_score" in field_keys:
+                    row["rev_score"] = ms.group(1) if ms else ""
+                if "rev_count" in field_keys or True: # Add count if not requested just in case
+                    row["rev_count"] = mc.group(1).replace(",", "") if mc else "0"
+                if row:
+                    return [row]
+        
+        elif section == "boost":
+            if "boost_genius_program" in field_keys and "GeniusBaseProgrammeConfig" in html:
+                m = re.search(r'"status":"(ACTIVE|INACTIVE)","productConfig":\{"__typename":"GeniusBaseProgrammeConfig","isEligible":(?:true|false),"eligibilityStatus":"(\w+)"', html)
+                mp = re.search(r'"isPriceCompetitive":(true|false)', html)
+                if m:
+                    status = m.group(1)
+                    elig = m.group(2)
+                    gs = "Enrolled" if status == "ACTIVE" else ("Eligible" if elig == "ELIGIBLE" else "Not Eligible")
+                    row["boost_genius_program"] = gs
+                if mp:
+                    row["genius_competitive"] = "Competitive" if mp.group(1) == "true" else "Not Competitive"
+                if row:
+                    return [row]
+            
+            if "boost_preferred_program" in field_keys and "isPreferred" in html:
+                is_pref = re.search(r'"isPreferred":\s*(\d+)', html)
+                is_plus = re.search(r'"isPreferredPlus":\s*(\d+)', html)
+                if is_pref:
+                    ip = int(is_pref.group(1))
+                    ipl = int(is_plus.group(1)) if is_plus else 0
+                    if ip == 1:
+                        status = "You're a member" + (" (Plus)" if ipl == 1 else "")
+                    elif ip == 0:
+                        status = "Not Enrolled"
+                    else:
+                        status = ""
+                    row["boost_preferred_program"] = status
+                    return [row]
+
+        elif section == "dashboard":
+            if "perf_score" in field_keys or "performanceScore" in html:
+                m = re.search(r'"performanceScore":\s*\{"formattedScore":"([\d.]+%?)"', html)
+                if m:
+                    row["perf_score"] = m.group(1)
+                    return [row]
+        
+        return []
+
     def navigate_to_section(self, page, section_key: str) -> None:
         worker = getattr(self, "worker", None)
         # Load from saved params file if present to check if we can bypass scanning
@@ -1485,6 +1540,14 @@ class BookingExtranetSource(ExtranetSource):
 
         return rows
 
+    def _fast_regex_extract(self, html: str, url: str, field_keys: list[str], section: str) -> list[dict]:
+        """
+        Subclasses can override this to implement pure Regex/JSON parsing on the raw HTML
+        to completely bypass Playwright DOM rendering for maximum speed.
+        Returns a list of data rows if successful, or an empty list to fall back to Playwright DOM parsing.
+        """
+        return []
+
     def _extract_single_property_data(self, page, field_keys: list[str], section: str) -> list[dict]:
         # Get labels for the keys
         job = getattr(self, "job", None)
@@ -1544,18 +1607,82 @@ class BookingExtranetSource(ExtranetSource):
             clicked = False
             
             if path:
-                # Use stored hotel_id and ses if available, otherwise get from page URL
+                # Use stored hotel_id and ses if available, otherwise get from page URL/DOM/cookies
                 hotel_id = getattr(self, "current_hotel_id", None)
-                if not hotel_id:
+                if not hotel_id or hotel_id == "single":
                     hotel_id_match = re.search(r'hotel_id=(\d+)', page.url)
-                    hotel_id = hotel_id_match.group(1) if hotel_id_match else ""
-                
+                    if hotel_id_match:
+                        hotel_id = hotel_id_match.group(1)
+                    else:
+                        try:
+                            el = page.locator("[data-hotel-id]").first
+                            if el.count() > 0:
+                                val = el.get_attribute("data-hotel-id")
+                                if val and val.isdigit():
+                                    hotel_id = val
+                        except Exception:
+                            pass
+                        
+                        if not hotel_id or hotel_id == "single":
+                            try:
+                                link = page.locator("a[href*='hotel_id=']").first
+                                if link.count() > 0:
+                                    href = link.get_attribute("href")
+                                    m = re.search(r'hotel_id=(\d+)', href)
+                                    if m:
+                                        hotel_id = m.group(1)
+                            except Exception:
+                                pass
+                        
+                        if not hotel_id or hotel_id == "single":
+                            try:
+                                cookies = page.context.cookies()
+                                for cookie in cookies:
+                                    if cookie['name'] in ['last_hotel_id', 'hotel_id'] and cookie['value'].isdigit():
+                                        hotel_id = cookie['value']
+                                        break
+                            except Exception:
+                                pass
+
+                        if not hotel_id or hotel_id == "single":
+                            try:
+                                html_content = page.content()
+                                m = re.search(r'hotel_id=(\d+)', html_content)
+                                if m:
+                                    hotel_id = m.group(1)
+                            except Exception:
+                                pass
+                if hotel_id and hotel_id != "single":
+                    self.current_hotel_id = hotel_id
+
                 ses = getattr(self, "current_ses", None)
                 if not ses:
                     ses_match = re.search(r'ses=([a-f0-9]+)', page.url)
-                    ses = ses_match.group(1) if ses_match else ""
+                    if ses_match:
+                        ses = ses_match.group(1)
+                    else:
+                        try:
+                            link = page.locator("a[href*='ses=']").first
+                            if link.count() > 0:
+                                href = link.get_attribute("href")
+                                m = re.search(r'ses=([a-f0-9]+)', href)
+                                if m:
+                                    ses = m.group(1)
+                        except Exception:
+                            pass
+                        
+                        if not ses:
+                            try:
+                                html_content = page.content()
+                                m = re.search(r'ses=([a-f0-9]+)', html_content)
+                                if m:
+                                    ses = m.group(1)
+                            except Exception:
+                                pass
+                if ses:
+                    self.current_ses = ses
                 
-                if hotel_id and ses:
+                if hotel_id and hotel_id != "single" and ses:
                     sub_tab_url = f"https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/{path}?hotel_id={hotel_id}&ses={ses}&lang=en"
                     if worker:
                         worker.log_msg.emit(f"  -> Background fetching sub-tab: {label}...")
@@ -1788,6 +1915,23 @@ class BookingExtranetSource(ExtranetSource):
                         html = self._fast_fetch_html(page, url)
                         is_login_redirect = "sign-in" in html or "op_token" in html or len(html) < 200
                         if html and not html.startswith("FETCH_ERROR") and not is_login_redirect:
+                            # 1) Attempt pure regex extraction on the raw HTML string
+                            regex_rows = self._fast_regex_extract(html, url, field_keys, section)
+                            if regex_rows:
+                                if worker:
+                                    worker.log_msg.emit(f"  -> ⚡ Fast regex extraction successful for {hotel_name}!")
+                                for r in regex_rows:
+                                    if not r.get("hotel_id"):
+                                        r["hotel_id"] = hotel_id
+                                    if not r.get("hotel_name"):
+                                        r["hotel_name"] = hotel_name
+                                    all_rows.append(r)
+                                    if worker:
+                                        worker.live_data.emit(r)
+                                self._append_scraped_property_data(hotel_id, hotel_name, regex_rows, "Completed")
+                                continue # Bypass all Playwright DOM parsing for this property/section!
+                            
+                            # 2) Fallback: Inject HTML into DOM for generic selectors
                             page.set_content(html, wait_until="commit")
                         else:
                             if worker:
@@ -1848,18 +1992,86 @@ class BookingExtranetSource(ExtranetSource):
         # For single property, also try to tag with the exact hotel name and ID if we are on a valid extranet page
         exact_hotel_name = self._extract_property_name_from_page(page)
         
-        hotel_id_match = re.search(r'hotel_id=(\d+)', page.url)
-        if hotel_id_match:
-            self.current_hotel_id = hotel_id_match.group(1)
-        hotel_id = getattr(self, "current_hotel_id", None) or "single"
+        hotel_id = getattr(self, "current_hotel_id", None)
+        if not hotel_id or hotel_id == "single":
+            hotel_id_match = re.search(r'hotel_id=(\d+)', page.url)
+            if hotel_id_match:
+                hotel_id = hotel_id_match.group(1)
+            else:
+                try:
+                    el = page.locator("[data-hotel-id]").first
+                    if el.count() > 0:
+                        val = el.get_attribute("data-hotel-id")
+                        if val and val.isdigit():
+                            hotel_id = val
+                except Exception:
+                    pass
+                
+                if not hotel_id or hotel_id == "single":
+                    try:
+                        link = page.locator("a[href*='hotel_id=']").first
+                        if link.count() > 0:
+                            href = link.get_attribute("href")
+                            m = re.search(r'hotel_id=(\d+)', href)
+                            if m:
+                                hotel_id = m.group(1)
+                    except Exception:
+                        pass
+                
+                if not hotel_id or hotel_id == "single":
+                    try:
+                        cookies = page.context.cookies()
+                        for cookie in cookies:
+                            if cookie['name'] in ['last_hotel_id', 'hotel_id'] and cookie['value'].isdigit():
+                                hotel_id = cookie['value']
+                                break
+                    except Exception:
+                        pass
+
+                if not hotel_id or hotel_id == "single":
+                    try:
+                        html_content = page.content()
+                        m = re.search(r'hotel_id=(\d+)', html_content)
+                        if m:
+                            hotel_id = m.group(1)
+                    except Exception:
+                        pass
+        if hotel_id and hotel_id != "single":
+            self.current_hotel_id = hotel_id
+        else:
+            hotel_id = "single"
         
-        ses_match = re.search(r'ses=([a-f0-9]+)', page.url)
-        if ses_match:
-            self.current_ses = ses_match.group(1)
-        ses = getattr(self, "current_ses", None) or ""
+        ses = getattr(self, "current_ses", None)
+        if not ses:
+            ses_match = re.search(r'ses=([a-f0-9]+)', page.url)
+            if ses_match:
+                ses = ses_match.group(1)
+            else:
+                try:
+                    link = page.locator("a[href*='ses=']").first
+                    if link.count() > 0:
+                        href = link.get_attribute("href")
+                        m = re.search(r'ses=([a-f0-9]+)', href)
+                        if m:
+                            ses = m.group(1)
+                except Exception:
+                    pass
+                
+                if not ses:
+                    try:
+                        html_content = page.content()
+                        m = re.search(r'ses=([a-f0-9]+)', html_content)
+                        if m:
+                            ses = m.group(1)
+                    except Exception:
+                        pass
+        if ses:
+            self.current_ses = ses
+        else:
+            ses = ""
 
         # Persist updated parameters to JSON if we found new ones
-        if (hotel_id_match or ses_match) and ses and hotel_id and hotel_id != "single":
+        if ses and hotel_id and hotel_id != "single":
             try:
                 params_path = COOKIES_DIR / f"{self.source_key}_params.json"
                 with open(params_path, "w") as f:
@@ -1970,6 +2182,36 @@ class MMTExtranetSource(ExtranetSource):
     def login(self, page):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_timeout(1000)
+
+    def _fast_regex_extract(self, html: str, url: str, field_keys: list[str], section: str) -> list[dict]:
+        """
+        Fast Regex parsing for MMT Extranet.
+        Matches exact HTML/JSON structure from the endpoints.
+        """
+        row = {}
+        if section == "reviews":
+            # Example: Try to parse JSON from Next.js __INITIAL_STATE__ if present
+            m = re.search(r'__INITIAL_STATE__\s*=\s*({.*});', html)
+            if m:
+                try:
+                    data = json.loads(m.group(1))
+                    # Attempt to extract review score/count if structure is known
+                    # For now, fallback to DOM if not confident
+                except Exception:
+                    pass
+            # Or if it's a direct JSON API response:
+            if html.strip().startswith("{"):
+                try:
+                    data = json.loads(html)
+                    if "reviewScore" in data:
+                        row["mmt_rev_score"] = str(data["reviewScore"])
+                    if "totalReviews" in data:
+                        row["mmt_rev_count"] = str(data["totalReviews"])
+                    if row:
+                        return [row]
+                except Exception:
+                    pass
+        return []
 
     def navigate_to_section(self, page, section_key: str) -> None:
         base = "https://hotel.makemytrip.com"
@@ -2231,6 +2473,25 @@ class GoibiboExtranetSource(ExtranetSource):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_timeout(1000)
 
+    def _fast_regex_extract(self, html: str, url: str, field_keys: list[str], section: str) -> list[dict]:
+        """
+        Fast Regex parsing for Goibibo Extranet.
+        """
+        row = {}
+        if section == "reviews":
+            if html.strip().startswith("{"):
+                try:
+                    data = json.loads(html)
+                    if "reviewScore" in data:
+                        row["goi_rev_score"] = str(data["reviewScore"])
+                    if "totalReviews" in data:
+                        row["goi_rev_count"] = str(data["totalReviews"])
+                    if row:
+                        return [row]
+                except Exception:
+                    pass
+        return []
+
     def navigate_to_section(self, page, section_key: str) -> None:
         base = "https://partners.go-mmt.com"
         section_map = {
@@ -2490,6 +2751,30 @@ class AgodaExtranetSource(ExtranetSource):
     def login(self, page):
         page.goto(self.login_url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_timeout(1000)
+
+    def _fast_regex_extract(self, html: str, url: str, field_keys: list[str], section: str) -> list[dict]:
+        """
+        Fast Regex parsing for Agoda Extranet (GraphQL / API response).
+        """
+        row = {}
+        if section == "reviews":
+            if html.strip().startswith("{"):
+                try:
+                    data = json.loads(html)
+                    # Example generic extraction if GraphQL returns expected keys
+                    if "data" in data:
+                        d = str(data["data"])
+                        ms = re.search(r"'ratingScore':\s*([\d.]+)", d)
+                        mc = re.search(r"'totalReviews':\s*(\d+)", d)
+                        if "agd_rev_score" in field_keys and ms:
+                            row["agd_rev_score"] = ms.group(1)
+                        if mc:
+                            row["agd_rev_count"] = mc.group(1)
+                    if row:
+                        return [row]
+                except Exception:
+                    pass
+        return []
 
     def navigate_to_section(self, page, section_key: str) -> None:
         base = "https://ycs.agoda.com"
@@ -3524,15 +3809,19 @@ class ExtranetScrapeWorker(QThread):
         try:
             pw = sync_playwright().start()
             # Use launch_persistent_context to safely maintain logins/profile persistent state
+            args = [
+                f"--remote-debugging-port={EXTRANET_DEBUG_PORT}",
+                "--no-first-run",
+                "--window-size=1280,900",
+            ]
+            if self.job.headless:
+                args.append("--headless=new")
+                
             context = pw.chromium.launch_persistent_context(
                 user_data_dir=str(COOKIES_DIR / 'chrome_extranet'),
-                headless=self.job.headless,
+                headless=False,
                 channel="chrome",
-                args=[
-                    f"--remote-debugging-port={EXTRANET_DEBUG_PORT}",
-                    "--no-first-run",
-                    "--window-size=1280,900",
-                ]
+                args=args
             )
 
             if getattr(self.job, 'fast_mode', False):

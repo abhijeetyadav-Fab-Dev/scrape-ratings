@@ -154,9 +154,28 @@ class DeepResearchWorker(threading.Thread):
         self.signals.log.emit(f"🤖 Agent Initiated: Batch Deep Research on {len(valid_queries)} target(s)...")
         
         browser = None
+        context = None
+        page = None
+        
+        def ensure_page_launched():
+            nonlocal browser, context, page
+            if page is None:
+                if browser is None:
+                    browser = _get_headless_browser()
+                context = browser.new_context(
+                    viewport={'width': 1280, 'height': 900},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    locale="en-US",
+                    timezone_id="Asia/Kolkata"
+                )
+                page = context.new_page()
+                page.set_extra_http_headers({
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                })
+                page.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "stylesheet", "font", "media") else route.continue_())
+
         try:
-            browser = _get_headless_browser()
-            
             for step_num, (orig_idx, target) in enumerate(valid_queries, 1):
                 if step_num > 1:
                     self.signals.log.emit("  ⏳ Waiting to prevent rate limits...")
@@ -172,19 +191,6 @@ class DeepResearchWorker(threading.Thread):
                     })
                     continue
                 
-                # Launch clean page tab context for each query to bypass anti-bot track checks
-                context = browser.new_context(
-                    viewport={'width': 1280, 'height': 900},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    locale="en-US",
-                    timezone_id="Asia/Kolkata"
-                )
-                page = context.new_page()
-                page.set_extra_http_headers({
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                })
-                page.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "stylesheet", "font", "media") else route.continue_())
                 
                 # Get item context for this query
                 item_info = None
@@ -237,7 +243,9 @@ class DeepResearchWorker(threading.Thread):
                 links = []
                 
                 # Fast path: Construct direct URLs from IDs if available
-                if item_info:
+                if target.strip().lower().startswith("http"):
+                    links.append({'href': target.strip(), 'text': 'Direct Input Link'})
+                elif item_info:
                     bcom_id = item_info.get('bcom_id', '').strip()
                     mmt_id = item_info.get('mmt_id', '').strip()
                     if bcom_id and (not self.platform_filter or self.platform_filter == 'booking' or self.platform_filter == 'any'):
@@ -247,40 +255,101 @@ class DeepResearchWorker(threading.Thread):
                         direct_url = f"https://www.makemytrip.com/hotels/hotel-details/?hotelId={mmt_id}"
                         links.append({'href': direct_url, 'text': 'Direct MMT ID Link'})
                 
+                from curl_cffi import requests as curl_requests
+                from bs4 import BeautifulSoup
+                
                 # 1. Yahoo (Fastest, High Resilience)
                 if not links:
+                    yahoo_url = f"https://search.yahoo.com/search?q={search_query.replace(' ', '+')}"
                     try:
-                        yahoo_url = f"https://search.yahoo.com/search?q={search_query.replace(' ', '+')}"
-                        page.goto(yahoo_url, timeout=12000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(2000)
-                        links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
-                    except Exception:
-                        pass
+                        r = curl_requests.get(
+                            yahoo_url,
+                            headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                "Accept-Language": "en-US,en;q=0.5",
+                            },
+                            timeout=10,
+                            impersonate="chrome120"
+                        )
+                        if r.status_code == 200:
+                            soup = BeautifulSoup(r.text, 'html.parser')
+                            links = [{'href': el['href'], 'text': el.get_text().strip()} for el in soup.find_all('a', href=True)]
+                    except Exception as e:
+                        self.signals.log.emit(f"  ⚠️ Yahoo query via curl_cffi failed: {e}")
+                    
+                    if not links:
+                        try:
+                            ensure_page_launched()
+                            page.goto(yahoo_url, timeout=12000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(2000)
+                            links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
+                        except Exception:
+                            pass
 
                 # 2. Bing
                 if not links:
+                    bing_url = f"https://www.bing.com/search?q={search_query.replace(' ', '+')}"
                     try:
-                        bing_url = f"https://www.bing.com/search?q={search_query.replace(' ', '+')}"
-                        page.goto(bing_url, timeout=12000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(2000)
-                        links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
-                    except Exception:
-                        pass
+                        r = curl_requests.get(
+                            bing_url,
+                            headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                "Accept-Language": "en-US,en;q=0.5",
+                            },
+                            timeout=10,
+                            impersonate="chrome120"
+                        )
+                        if r.status_code == 200:
+                            soup = BeautifulSoup(r.text, 'html.parser')
+                            links = [{'href': el['href'], 'text': el.get_text().strip()} for el in soup.find_all('a', href=True)]
+                    except Exception as e:
+                        self.signals.log.emit(f"  ⚠️ Bing query via curl_cffi failed: {e}")
+                    
+                    if not links:
+                        try:
+                            ensure_page_launched()
+                            page.goto(bing_url, timeout=12000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(2000)
+                            links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
+                        except Exception:
+                            pass
                 
                 # 3. DuckDuckGo
                 if not links:
+                    ddg_url = f"https://html.duckduckgo.com/html/?q={search_query.replace(' ', '+')}"
                     try:
-                        ddg_url = f"https://html.duckduckgo.com/html/?q={search_query.replace(' ', '+')}"
-                        page.goto(ddg_url, timeout=15000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(2000)
-                        links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
-                    except Exception:
-                        pass
+                        r = curl_requests.get(
+                            ddg_url,
+                            headers={
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                                "Accept-Language": "en-US,en;q=0.5",
+                            },
+                            timeout=10,
+                            impersonate="chrome120"
+                        )
+                        if r.status_code == 200:
+                            soup = BeautifulSoup(r.text, 'html.parser')
+                            links = [{'href': el['href'], 'text': el.get_text().strip()} for el in soup.find_all('a', href=True)]
+                    except Exception as e:
+                        self.signals.log.emit(f"  ⚠️ DuckDuckGo query via curl_cffi failed: {e}")
+                        
+                    if not links:
+                        try:
+                            ensure_page_launched()
+                            page.goto(ddg_url, timeout=15000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(2000)
+                            links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
+                        except Exception:
+                            pass
 
                 # 4. Google (Last Resort due to Captchas)
                 if not links:
                     google_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
                     try:
+                        ensure_page_launched()
                         page.goto(google_url, timeout=12000, wait_until="domcontentloaded")
                         page.wait_for_timeout(2000)
                         raw_links = page.evaluate("() => Array.from(document.querySelectorAll('a')).map(el => ({href: el.href, text: el.innerText || el.textContent || ''}))")
@@ -370,20 +439,15 @@ class DeepResearchWorker(threading.Thread):
                     # Try resolving redirect using curl_cffi first (super fast and bypasses most blocks)
                     try:
                         from curl_cffi import requests as curl_requests
-                        from curl_cffi.const import CurlHttpVersion
-                        
+
                         headers = {
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                             "Accept-Language": "en-US,en;q=0.5",
                         }
-                        # We use HTTP/1.1 for MMT / Goibibo to bypass potential Akamai HTTP/2 stream errors
-                        http_ver = CurlHttpVersion.V1_1 if 'makemytrip' in decoded_href or 'goibibo' in decoded_href else CurlHttpVersion.NONE
-                        
                         r_res = curl_requests.get(
                             decoded_href,
                             headers=headers,
-                            http_version=http_ver,
                             timeout=10,
                             allow_redirects=True,
                             impersonate="chrome120"
@@ -394,6 +458,7 @@ class DeepResearchWorker(threading.Thread):
                         self.signals.log.emit(f"  ⚠️ Redirect resolution via curl_cffi failed: {e}")
                         # Fallback to Playwright page.goto if curl_cffi fails
                         try:
+                            ensure_page_launched()
                             page.goto(decoded_href, timeout=20000, wait_until="load")
                             try:
                                 page.wait_for_load_state("networkidle", timeout=3000)
@@ -405,6 +470,7 @@ class DeepResearchWorker(threading.Thread):
                             self.signals.log.emit(f"  ⚠️ Redirect resolution fallback failed: {e2}")
                             if orig_href != decoded_href:
                                 try:
+                                    ensure_page_launched()
                                     page.goto(orig_href, timeout=20000, wait_until="load")
                                     try:
                                         page.wait_for_load_state("networkidle", timeout=3000)
@@ -424,7 +490,7 @@ class DeepResearchWorker(threading.Thread):
                     
                     # Ensure it is a details page for MMT to prevent general homepage/landing page redirects from registering as resolved
                     if final_plat == 'mmt':
-                        if not ('-details-' in resolved_url.lower() or 'hotel-details' in resolved_url.lower()):
+                        if not ('-details-' in resolved_url.lower() or 'hotel-details' in resolved_url.lower() or 'hoteldetails' in resolved_url.lower()):
                             final_plat = None
                     
                     # Enforce platform filter on final resolved URL
@@ -476,6 +542,7 @@ class DeepResearchWorker(threading.Thread):
                         # 2. Fallback to Playwright if coordinates not extracted from static html
                         if cand_lat is None or cand_lng is None:
                             try:
+                                ensure_page_launched()
                                 if page.url != resolved_url:
                                     page.goto(resolved_url, timeout=20000, wait_until="domcontentloaded")
                                 try:
@@ -515,7 +582,11 @@ class DeepResearchWorker(threading.Thread):
                         self.signals.log.emit(f"  🧠 AI Verification active for: {resolved_url[:60]}...")
                         page_title = ""
                         try:
-                            page_title = page.title()
+                            if page:
+                                page_title = page.title()
+                            else:
+                                m_title = re.search(r'<title[^>]*>(.*?)</title>', html_content, re.IGNORECASE | re.DOTALL)
+                                page_title = m_title.group(1).strip() if m_title else ""
                         except:
                             pass
                         
@@ -639,21 +710,35 @@ class DeepResearchWorker(threading.Thread):
                     
                     if plat == 'mmt' and not hid and self.deep_extract:
                         self.signals.log.emit("  🕵️ Deep extracting MMT Hotel ID...")
+                        html = html_content or ""
                         try:
-                            url_parts = urlparse(resolved_url)
-                            query = parse_qs(url_parts.query)
-                            query_lower = {k.lower(): v for k, v in query.items()}
-                            if 'hotelid' in query_lower:
-                                hid = query_lower['hotelid'][0]
-                                self.signals.log.emit(f"  ✓ Found ID in URL query: {hid}")
-                            elif 'tophtlid' in query_lower:
-                                hid = query_lower['tophtlid'][0]
-                                self.signals.log.emit(f"  ✓ Found ID in URL query (topHtlId): {hid}")
+                            # Use regex instead of urlparse because MMT URLs sometimes lack the '?' before parameters (e.g., hoteldetails_uCurrency...)
+                            import re
+                            m = re.search(r'[&?]hotel[iI]d=([^&]+)', resolved_url)
+                            if m:
+                                hid = m.group(1)
+                                self.signals.log.emit(f"  ✓ Found ID in URL parameters: {hid}")
+                            else:
+                                m = re.search(r'[&?]top[hH]tl[iI]d=([^&]+)', resolved_url)
+                                if m:
+                                    hid = m.group(1)
+                                    self.signals.log.emit(f"  ✓ Found ID in URL parameters (topHtlId): {hid}")
                         except Exception as e:
-                            self.signals.log.emit(f"⚠️ URL query parsing failed: {e}")
+                            self.signals.log.emit(f"⚠️ URL parameter parsing failed: {e}")
+                        
+                        # Fast path: Try parsing from static HTML first
+                        if not hid and html:
+                            try:
+                                m = re.search(r'"hotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'"mtxHotelId"\s*:\s*"?(\d+)"?', html) or re.search(r'hotelId\s*=\s*"?(\d+)"?', html) or re.search(r'hotelId(?:["\':\s]*)([a-zA-Z0-9_]+)', html)
+                                if m:
+                                    hid = m.group(1)
+                                    self.signals.log.emit(f"  ✓ Found ID from page source regex: {hid}")
+                            except Exception:
+                                pass
                         
                         if not hid:
                             try:
+                                ensure_page_launched()
                                 if page:
                                     try:
                                         page.wait_for_load_state("load", timeout=3000)

@@ -36,7 +36,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, csv_path=None, workers=10):
         super().__init__()
-        self.setWindowTitle("Hotel Data Tools v2.1 — Ratings, God Mode & Universal Scraper")
+        self.setWindowTitle("Hotel Data Tools v2.4 — Ratings, God Mode & Universal Scraper")
 
         icon_path = str(Path(__file__).parent / "icon.ico")
         if os.path.exists(icon_path):
@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event: QDropEvent):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
-        if files and files[0].endswith('.csv'):
+        if files and (files[0].endswith('.csv') or files[0].endswith('.xlsx') or files[0].endswith('.xls')):
             current_idx = self.tabs.currentIndex()
             # If user is on the Bulk OCM Generator tab, forward the CSV there
             if current_idx == 3:

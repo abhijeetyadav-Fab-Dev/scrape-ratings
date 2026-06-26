@@ -118,9 +118,39 @@ class PageScanner:
             'cards': [],
             'jsonld': [],
             'ratings': [],
+            'api_endpoints': [],
             'all_text_length': 0,
             'links': [],
         }
+
+        def handle_response(response):
+            try:
+                rt = response.request.resource_type
+                if rt in ['xhr', 'fetch'] or 'json' in response.headers.get('content-type', '').lower():
+                    req_url = response.url
+                    excludes = ['.jpg', '.png', '.css', '.js', '.woff', 'google-analytics', 'tracking', 'telemetry', 'log', 'fonts.']
+                    if not any(ext in req_url.lower() for ext in excludes):
+                        snippet = ""
+                        if response.ok:
+                            try:
+                                # In sync_api, reading body could throw if stream not finished, so wrap in broad try-catch
+                                # Using raw text to avoid JSON parsing overhead/errors
+                                snippet = str(response.body())[:150]
+                            except:
+                                pass
+                        result['api_endpoints'].append({
+                            'url': req_url[:300],
+                            'method': response.request.method,
+                            'status': response.status,
+                            'snippet': snippet
+                        })
+            except:
+                pass
+
+        try:
+            page.on("response", handle_response)
+        except Exception:
+            pass
 
         try:
             page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
@@ -585,8 +615,10 @@ class GodModeWorker(QThread):
             row = {'url': url}
             is_google = "google.com" in url.lower() or "goo.gl" in url.lower() or "g.page" in url.lower()
 
+            has_api_fields = any(f.get('type') == 'api' or f['selector'].startswith('http') for f in self.field_config)
+            
             # Fast path for generic pages using requests
-            if not is_google and self.field_config:
+            if not is_google and self.field_config and not has_api_fields:
                 try:
                     resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
                     resp.raise_for_status()
@@ -693,6 +725,23 @@ class GodModeWorker(QThread):
                     for field in self.field_config:
                         name = field['name']
                         selector = field['selector']
+                        
+                        if field.get('type') == 'api' or selector.startswith('http'):
+                            try:
+                                # Fetch the API endpoint in the browser context to inherit cookies
+                                resp_text = await page.evaluate(f"""async () => {{
+                                    try {{
+                                        const res = await fetch("{selector}");
+                                        return await res.text();
+                                    }} catch(e) {{
+                                        return "ERROR: " + e.toString();
+                                    }}
+                                }}""")
+                                row[name] = str(resp_text)[:32000] # Cap size for Excel
+                            except Exception as e:
+                                row[name] = f"Error fetching API: {e}"
+                            continue
+                            
                         attr = field.get('attribute', 'text')
                         multiple = field.get('multiple', False)
                         if multiple:
@@ -1680,6 +1729,61 @@ class ParallelListingWorker(QThread):
         import urllib.parse
         import difflib
 
+        def fast_fetch_photos(url, platform):
+            try:
+                from bs4 import BeautifulSoup
+                from curl_cffi import requests as curl_requests
+                import pickle
+                from pathlib import Path
+
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.5",
+                }
+                cookies = {}
+                if platform == 'mmt':
+                    cookies_path = Path.home() / ".scrape-ratings" / "mmt_cookies.pkl"
+                    if cookies_path.exists():
+                        try:
+                            with open(cookies_path, 'rb') as f:
+                                c_list = pickle.load(f)
+                                if isinstance(c_list, list):
+                                    for c in c_list:
+                                        cookies[c['name']] = c['value']
+                        except Exception:
+                            pass
+                resp = curl_requests.get(url, headers=headers, cookies=cookies, impersonate="chrome120", timeout=12)
+                if resp.status_code != 200:
+                    return None
+                html = resp.text
+                if "denied" in html.lower() or "blocked" in html.lower() or "captcha" in html.lower() or len(html) < 2000:
+                    return None
+                soup = BeautifulSoup(html, 'html.parser')
+                img_selectors = {
+                    'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo',
+                    'agoda': '.PropertyGallery img, img[src*="images/hotel"], img[src*="agoda.com"]',
+                    'expedia': '[data-stid="gallery-image"] img, img[src*="expedia.com"], .media-gallery img',
+                    'mmt': 'img[id*="detpg_"], img[src*="hotel"], .gallery img'
+                }
+                sel = img_selectors.get(platform, 'img')
+                img_tags = soup.select(sel)
+                if not img_tags:
+                    img_tags = soup.select('img[src*="hotel"], img[src*="max"], img[src*="images/hotel"]')
+                if not img_tags:
+                    img_tags = [el for el in soup.find_all('img') if el.get('src') and ('hotel' in el.get('src').lower() or 'max' in el.get('src').lower())]
+                photos = []
+                for img in img_tags:
+                    src = img.get('src') or img.get('data-src') or img.get('data-lazy')
+                    if src and src not in photos:
+                        if src.startswith('//'): src = 'https:' + src
+                        photos.append(src)
+                        if len(photos) >= 10:
+                            break
+                return photos if photos else None
+            except Exception:
+                return None
+
         cleaned_target = clean_hotel_name(self.hotel_name)
         if self.city.lower() in cleaned_target.lower():
             query = cleaned_target
@@ -1691,7 +1795,7 @@ class ParallelListingWorker(QThread):
 
         with sync_playwright() as p:
             try:
-                browser = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
+                browser = p.chromium.launch(headless=False, args=["--headless=new", "--disable-blink-features=AutomationControlled"])
                 context = browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1280, "height": 800},
@@ -1820,33 +1924,39 @@ class ParallelListingWorker(QThread):
                                 self.progress.emit(f"Designated target reference hotel: {name} ({platform.upper()})")
                                 is_reference_hotel = True
                                 # Fetch details photos for target
-                                try:
-                                    ref_page = context.new_page()
-                                    ref_page.goto(url, timeout=15000, wait_until="domcontentloaded")
-                                    ref_page.wait_for_timeout(1000)
-                                    img_selectors = {
-                                        'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo',
-                                        'agoda': '.PropertyGallery img, img[src*="images/hotel"], img[src*="agoda.com"]',
-                                        'expedia': '[data-stid="gallery-image"] img, img[src*="expedia.com"], .media-gallery img',
-                                        'mmt': 'img[id*="detpg_"], img[src*="hotel"], .gallery img'
-                                    }
-                                    sel = img_selectors.get(platform, 'img')
-                                    img_els = ref_page.query_selector_all(sel)
-                                    if not img_els:
-                                        img_els = ref_page.query_selector_all('img[src*="hotel"], img[src*="max"], img[src*="images/hotel"]')
-                                    if not img_els:
-                                        img_els = [el for el in ref_page.query_selector_all('img') if el.get_attribute('src') and ('hotel' in el.get_attribute('src').lower() or 'max' in el.get_attribute('src').lower())]
-                                    for img in img_els:
-                                        src = img.get_attribute('src') or img.get_attribute('data-src') or img.get_attribute('data-lazy')
-                                        if src and src not in target_photos:
-                                            if src.startswith('//'): src = 'https:' + src
-                                            target_photos.append(src)
-                                            if len(target_photos) >= 10:
-                                                break
-                                    ref_page.close()
-                                    self.progress.emit(f"Loaded {len(target_photos)} reference photos from details page.")
-                                except Exception as e:
-                                    self.progress.emit(f"Error loading reference photos: {e}")
+                                self.progress.emit("Fetching target reference photos...")
+                                target_photos = fast_fetch_photos(url, platform) or []
+                                if target_photos:
+                                    self.progress.emit(f"Loaded {len(target_photos)} reference photos via HTTP fast-path.")
+                                else:
+                                    self.progress.emit("HTTP fast-path failed, falling back to Playwright for reference photos...")
+                                    try:
+                                        ref_page = context.new_page()
+                                        ref_page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                                        ref_page.wait_for_timeout(1000)
+                                        img_selectors = {
+                                            'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo',
+                                            'agoda': '.PropertyGallery img, img[src*="images/hotel"], img[src*="agoda.com"]',
+                                            'expedia': '[data-stid="gallery-image"] img, img[src*="expedia.com"], .media-gallery img',
+                                            'mmt': 'img[id*="detpg_"], img[src*="hotel"], .gallery img'
+                                        }
+                                        sel = img_selectors.get(platform, 'img')
+                                        img_els = ref_page.query_selector_all(sel)
+                                        if not img_els:
+                                            img_els = ref_page.query_selector_all('img[src*="hotel"], img[src*="max"], img[src*="images/hotel"]')
+                                        if not img_els:
+                                            img_els = [el for el in ref_page.query_selector_all('img') if el.get_attribute('src') and ('hotel' in el.get_attribute('src').lower() or 'max' in el.get_attribute('src').lower())]
+                                        for img in img_els:
+                                            src = img.get_attribute('src') or img.get_attribute('data-src') or img.get_attribute('data-lazy')
+                                            if src and src not in target_photos:
+                                                if src.startswith('//'): src = 'https:' + src
+                                                target_photos.append(src)
+                                                if len(target_photos) >= 10:
+                                                    break
+                                        ref_page.close()
+                                        self.progress.emit(f"Loaded {len(target_photos)} reference photos from details page.")
+                                    except Exception as e:
+                                        self.progress.emit(f"Error loading reference photos: {e}")
                                 
                                 # Compute target hashes
                                 for t_url in target_photos:
@@ -1862,37 +1972,38 @@ class ParallelListingWorker(QThread):
                                 continue
 
                             # Navigate details page for the candidate to fetch up to 10 photos
-                            cand_photos = []
+                            cand_photos = fast_fetch_photos(url, platform) or []
                             cand_hashes = []
-                            try:
-                                cand_page = context.new_page()
-                                cand_page.goto(url, timeout=15000, wait_until="domcontentloaded")
-                                cand_page.wait_for_timeout(1000)
-                                
-                                img_selectors = {
-                                    'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo',
-                                    'agoda': '.PropertyGallery img, img[src*="images/hotel"], img[src*="agoda.com"]',
-                                    'expedia': '[data-stid="gallery-image"] img, img[src*="expedia.com"], .media-gallery img',
-                                    'mmt': 'img[id*="detpg_"], img[src*="hotel"], .gallery img'
-                                }
-                                sel = img_selectors.get(platform, 'img')
-                                img_els = cand_page.query_selector_all(sel)
-                                if not img_els:
-                                    # Fallback
-                                    img_els = cand_page.query_selector_all('img[src*="hotel"], img[src*="max"], img[src*="images/hotel"]')
-                                if not img_els:
-                                    img_els = [el for el in cand_page.query_selector_all('img') if el.get_attribute('src') and ('hotel' in el.get_attribute('src').lower() or 'max' in el.get_attribute('src').lower())]
-                                
-                                for img in img_els:
-                                    src = img.get_attribute('src') or img.get_attribute('data-src') or img.get_attribute('data-lazy')
-                                    if src and src not in cand_photos:
-                                        if src.startswith('//'): src = 'https:' + src
-                                        cand_photos.append(src)
-                                        if len(cand_photos) >= 10:
-                                            break
-                                cand_page.close()
-                            except Exception:
-                                pass
+                            if not cand_photos:
+                                try:
+                                    cand_page = context.new_page()
+                                    cand_page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                                    cand_page.wait_for_timeout(1000)
+                                    
+                                    img_selectors = {
+                                        'booking': '.gallery-image-container img, .gallery_grid img, img[src*="max1280x900"], a.gallery-entry img, .bh-photo-grid-item img, .bh-photo-grid-thumb img, .photo_grid_item img, [data-photo-id] img, img.kpv_photo',
+                                        'agoda': '.PropertyGallery img, img[src*="images/hotel"], img[src*="agoda.com"]',
+                                        'expedia': '[data-stid="gallery-image"] img, img[src*="expedia.com"], .media-gallery img',
+                                        'mmt': 'img[id*="detpg_"], img[src*="hotel"], .gallery img'
+                                    }
+                                    sel = img_selectors.get(platform, 'img')
+                                    img_els = cand_page.query_selector_all(sel)
+                                    if not img_els:
+                                        # Fallback
+                                        img_els = cand_page.query_selector_all('img[src*="hotel"], img[src*="max"], img[src*="images/hotel"]')
+                                    if not img_els:
+                                        img_els = [el for el in cand_page.query_selector_all('img') if el.get_attribute('src') and ('hotel' in el.get_attribute('src').lower() or 'max' in el.get_attribute('src').lower())]
+                                    
+                                    for img in img_els:
+                                        src = img.get_attribute('src') or img.get_attribute('data-src') or img.get_attribute('data-lazy')
+                                        if src and src not in cand_photos:
+                                            if src.startswith('//'): src = 'https:' + src
+                                            cand_photos.append(src)
+                                            if len(cand_photos) >= 10:
+                                                break
+                                    cand_page.close()
+                                except Exception:
+                                    pass
 
                             if not cand_photos and first_photo:
                                 cand_photos.append(first_photo)
@@ -2775,7 +2886,39 @@ class GodModeTab(QWidget):
                 link_layout.addWidget(cb)
             self.scan_layout.addWidget(links_group)
 
-        if not result.get('tables') and not result.get('lists') and not result.get('cards') and not result.get('jsonld') and not result.get('ratings'):
+        if result.get('api_endpoints'):
+            api_group = QGroupBox(f"Detected API Endpoints ({len(result['api_endpoints'])})")
+            api_layout = QVBoxLayout(api_group)
+            
+            seen_urls = set()
+            unique_apis = []
+            for ep in result['api_endpoints']:
+                if ep['url'] not in seen_urls:
+                    seen_urls.add(ep['url'])
+                    unique_apis.append(ep)
+                    
+            for ep in unique_apis[:15]:
+                method = ep['method']
+                status = ep['status']
+                snippet = ep.get('snippet', '')
+                try:
+                    snippet = snippet.decode('utf-8', errors='ignore')
+                except:
+                    pass
+                snippet = snippet.replace('\n', ' ').strip()
+                
+                label = f"[{method} {status}] {ep['url']}"
+                if snippet:
+                    label += f"\n   ↳ JSON Snippet: {snippet}..."
+                
+                cb = QCheckBox(label)
+                cb.setProperty('type', 'api')
+                cb.setProperty('url', ep['url'])
+                cb.stateChanged.connect(lambda state, c=cb: self._on_field_toggled(c))
+                api_layout.addWidget(cb)
+            self.scan_layout.addWidget(api_group)
+
+        if not result.get('tables') and not result.get('lists') and not result.get('cards') and not result.get('jsonld') and not result.get('ratings') and not result.get('api_endpoints'):
             no_data = QLabel("No structured data detected on this page. Try a different URL or add custom fields manually.")
             no_data.setStyleSheet("color: #888; font-style: italic; padding: 10px;")
             self.scan_layout.addWidget(no_data)
@@ -2793,7 +2936,7 @@ class GodModeTab(QWidget):
             item = QListWidgetItem(label)
             item.setProperty('config', {
                 'name': f"field_{self.field_list.count() + 1}",
-                'selector': checkbox.property('selector') or '',
+                'selector': checkbox.property('selector') or checkbox.property('url') or '',
                 'type': checkbox.property('type') or 'text',
             })
             self.field_list.addItem(item)

@@ -117,6 +117,15 @@
 - **PyQt6 GUI Thread-Safety Refactoring**: Resolved empty/invisible scanner results inside the God Mode UI tab by refactoring `_run_scan` and defining a thread-safe `PageScanWorker` class (subclassing `QThread`). The page scan execution is now offloaded from the GUI thread while GUI widget updates are properly delegated to the main thread via Qt signals, preventing silent UI failures and ensuring the detected checkboxes, tables, lists, and cards render correctly.
 - **CDP WebSocket Session Leak Prevention**: Discovered and resolved memory/resource connection leaks occurring on CDP Chrome integrations. Connect-over-CDP clients in `PageScanner.scan` and `GodModeWorker._run_async` now invoke `browser.close()` upon task completion. This safely disconnects the Playwright WebSocket sessions and releases resources without terminating the external, persistent Chrome process.
 
+## 2026-06-18
 
- 
- 
+### Agoda Two-Step Scraper Implementation
+- **Agoda Parallel Overhaul**: Replaced standard headless rendering with a custom two-step scraping architecture for Agoda in `async_api_scraper.py`. Implemented `curl_cffi` to fetch initial headers/cookies safely and injected the data into the JSON `BelowFoldParams/GetSecondaryData` endpoint for lightning-fast concurrent data extraction.
+- **WAF Auto-Detection Enhancement**: Expanded `_is_waf_blocked` heuristic in the `AsyncScraperEngine` to mitigate false positives where legitimate JSON variable strings containing WAF keywords triggered incorrect block detections.
+- **God Mode Parallel Optimization**: Refactored `ParallelListingWorker` in `god_mode.py`. Replaced the synchronous standard photo extraction block with `fast_fetch_photos`, leveraging the async infrastructure. Kept Playwright as a durable fallback to guarantee 100% data completion while maintaining max concurrency speeds.
+
+## 2026-06-19
+
+### Booking.com Single Property Scraper Extraction Optimization
+- **Single Property Extranet URL/DOM parameter extraction fallback**: Solved navigation failures on single-property accounts (which don't include `hotel_id` in their initial landing/dashboard URL) by robustly looking for the numeric `hotel_id` and `ses` token inside DOM properties, anchor links (`a[href*='hotel_id=']`), browser session cookies (`last_hotel_id` / `hotel_id`), and raw page HTML contents.
+- **Redirection / invalid 'single' ID URL query prevention**: Prevented background-fetch failures by ensuring we don't attempt fast fetching with an invalid `hotel_id="single"`, instead falling back to direct browser element clicking (`_navigate_to_sub_tab`) when a numeric `hotel_id` isn't yet extracted.
