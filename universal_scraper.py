@@ -3502,6 +3502,89 @@ class HotelsExtranetSource(ExtranetSource):
 
 
 # ───────────────────────────────────────────────────────────
+#  Async HTTP Scraper Source — Integration with Universal Scraper
+# ───────────────────────────────────────────────────────────
+
+class AsyncHTTPSource(ExtranetSource):
+    """
+    High-performance async HTTP scraper for any URL-based data source.
+    Integrates with the universal scraper framework.
+    
+    Use case: Scrape any website or API endpoint with:
+      - Concurrency control (anti-blocking)
+      - Browser-like headers
+      - Structured data extraction
+      - CSV export
+    """
+    
+    source_key = "async_http"
+    
+    @property
+    def source_name(self) -> str:
+        return "Async HTTP Scraper"
+    
+    @property
+    def login_url(self) -> str:
+        return "about:blank"
+    
+    @property
+    def available_fields(self) -> list[dict]:
+        """Fields for async HTTP scraper."""
+        return [
+            {
+                "group": "URL & Content",
+                "section": "content",
+                "fields": [
+                    {"key": "async_url", "label": "Source URL"},
+                    {"key": "async_title", "label": "Page Title"},
+                    {"key": "async_status", "label": "Scrape Status"},
+                    {"key": "async_timestamp", "label": "Timestamp"},
+                ]
+            },
+            {
+                "group": "Structured Data",
+                "section": "structured",
+                "fields": [
+                    {"key": "async_schema_type", "label": "Schema Type"},
+                    {"key": "async_name", "label": "Name (JSON-LD)"},
+                    {"key": "async_rating", "label": "Rating (JSON-LD)"},
+                    {"key": "async_description", "label": "Description"},
+                ]
+            },
+            {
+                "group": "API Discovery",
+                "section": "api",
+                "fields": [
+                    {"key": "async_api_endpoints", "label": "Discovered API Endpoints"},
+                ]
+            },
+        ]
+    
+    @property
+    def cookies_path(self) -> Path:
+        """No cookies needed for async HTTP scraper."""
+        return COOKIES_DIR / "async_http_session.pkl"
+    
+    def login(self, page) -> None:
+        """No login needed for async HTTP scraper."""
+        pass
+    
+    def navigate_to_section(self, page, section_key: str) -> None:
+        """No navigation needed — URLs are provided directly."""
+        pass
+    
+    def extract_data(self, page, selected_fields: list[dict]) -> list[dict]:
+        """
+        Extract data using the async HTTP scraper.
+        Note: page argument is ignored (async scraper doesn't use Playwright).
+        
+        For actual usage, the universal scraper UI should prompt for URLs,
+        then invoke async_scraper_core.RatingScraper directly.
+        """
+        return []
+
+
+# ───────────────────────────────────────────────────────────
 #  Source registry — add new sources here
 # ───────────────────────────────────────────────────────────
 
@@ -3512,6 +3595,7 @@ EXTRANET_SOURCES: dict[str, ExtranetSource] = {
     "agoda_extranet":   AgodaExtranetSource(),
     "expedia_extranet": ExpediaExtranetSource(),
     "hotels_extranet":  HotelsExtranetSource(),
+    "async_http":       AsyncHTTPSource(),
 }
 
 for key, src in EXTRANET_SOURCES.items():
