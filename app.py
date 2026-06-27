@@ -23,12 +23,13 @@ from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
 
 # ========================================================================
-# Import the three tab widgets
+# Import the tab widgets
 # ========================================================================
 from ratings_tab import RatingsTab
 from god_mode import GodModeTab
 from universal_scraper import UniversalScraperTab
 from ocm_tab import BulkOCMGeneratorTab
+from async_scraper_tab import AsyncScraperTab
 
 
 class MainWindow(QMainWindow):
@@ -36,7 +37,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, csv_path=None, workers=10):
         super().__init__()
-        self.setWindowTitle("Hotel Data Tools v2.4 — Ratings, God Mode & Universal Scraper")
+        self.setWindowTitle("Hotel Data Tools v2.5 — Ratings, God Mode, Universal & Async Scraper")
 
         icon_path = str(Path(__file__).parent / "icon.ico")
         if os.path.exists(icon_path):
@@ -79,7 +80,10 @@ class MainWindow(QMainWindow):
         # Tab 3 — Universal Scraper (extranet data extraction)
         self.tabs.addTab(UniversalScraperTab(), "Universal Scraper")
 
-        # Tab 4 — Bulk OCM Generator
+        # Tab 4 — Async Scraper (high-performance async web scraping)
+        self.tabs.addTab(AsyncScraperTab(), "Async Scraper")
+
+        # Tab 5 — Bulk OCM Generator
         self.tabs.addTab(BulkOCMGeneratorTab(), "Bulk OCM Generator")
 
         # ── Floating AI Agent Overlay Corner Integration ───────────
@@ -102,7 +106,7 @@ class MainWindow(QMainWindow):
             self.agent.move(w - self.agent.width() - margin, h - self.agent.height() - margin)
 
     def _on_tab_changed(self, index):
-        tab_names = ["Ratings Scraper", "God Mode", "Universal Scraper", "Bulk OCM Generator"]
+        tab_names = ["Ratings Scraper", "God Mode", "Universal Scraper", "Async Scraper", "Bulk OCM Generator"]
         name = tab_names[index] if index < len(tab_names) else "Agent Workspace"
         if hasattr(self, 'agent') and self.agent:
             self.agent.default_context = name
