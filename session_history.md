@@ -1,6 +1,67 @@
 # Scrape Ratings — Session History
 
-## 2026-05-21
+## 2026-06-27
+
+### Async Scraper Integration
+Created a complete high-performance async web scraper module and integrated it as a new PyQt6 tab in the main application.
+
+#### Files Created
+- **async_scraper_core.py** — Core async scraper engine with concurrency control, API discovery, and CSV export
+  - `RatingScraper` class with thread-safe async/await operations
+  - Semaphore-based concurrency control (configurable, default 10 concurrent requests)
+  - Browser-like headers with random user agent rotation
+  - Random delays (0.5-2s) between requests to prevent IP blocking
+  - Optional API endpoint discovery (tests /api, /v1, /graphql patterns)
+  - CSV export with structured data extraction (JSON-LD support)
+  - Progress callbacks for UI integration
+  - Stats tracking (success/failure counts, duration)
+  
+- **async_scraper_tab.py** — PyQt6 GUI tab for async scraping
+  - Complete tab widget with URL input (multiline text area)
+  - `ScrapeWorkerThread` class for background async operations
+  - Signal-slot communication for thread-safe UI updates
+  - Real-time progress bar with item counter
+  - Configurable concurrency control (1-50 threads via spinner)
+  - Optional API endpoint auto-discovery toggle
+  - Colored logging display with timestamps
+  - Checkpoint system (save/resume progress to JSON)
+  - Export folder shortcut
+  - Dark theme styling matching existing app
+
+#### Files Modified
+- **app.py**
+  - Added import: `from async_scraper_tab import AsyncScraperTab`
+  - Added new tab (index 3): "Async Scraper" between Universal Scraper and Bulk OCM Generator
+  - Updated window title to v2.5 including "Async Scraper"
+  - Updated `_on_tab_changed()` method to handle 5 tabs for agent overlay context switching
+
+- **CLAUDE.md**
+  - Documented async scraper architecture and patterns
+  - Updated Project Structure section to include async scraper components
+  - Added dependency list and installation instructions
+  - Documented new async scraper-specific patterns (concurrency, delays, checkpoints, signals)
+
+#### Commits Made
+1. `Add async_scraper_core.py with concurrency control & API discovery` — Core async engine
+2. `Add async_scraper_tab.py with PyQt6 GUI` — PyQt6 tab widget
+3. `Integrate AsyncScraperTab into main application` — Main app integration
+
+#### Architecture Notes
+- AsyncScraperTab runs `RatingScraper` in a dedicated worker thread using `asyncio.run()`
+- Browser-like anti-blocking: random User-Agent headers, configurable delays, semaphore-based rate limiting
+- API discovery optional (checkbox toggle) — tests common patterns (/api, /v1, /graphql, /rest, /data, /services, /ajax, /endpoint)
+- CSV export as primary format; extensible to JSON/SQLite later
+- Checkpoint system saves/resumes progress to `~/.scrape-ratings/checkpoints/`
+- Fully non-blocking GUI using PyQt6 signals-slots pattern
+
+#### Design Decisions
+- Async HTTP (httpx) chosen over Playwright for raw HTTP performance
+- Concurrency defaulted to 10 to balance speed vs. anti-blocking (configurable 1-50)
+- CSV-first export (user preference), other formats available via code extension
+- Optional API discovery (not forced) to avoid expensive discovery on simple scrapes
+- Standalone tab design: doesn't integrate with universal_scraper.py (can add later if needed)
+
+
 
 ### Initial Setup
 - Initialized git repository for the project
