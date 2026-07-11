@@ -29,7 +29,7 @@ from ratings_tab import RatingsTab
 from god_mode import GodModeTab
 from universal_scraper import UniversalScraperTab
 from ocm_tab import BulkOCMGeneratorTab
-from async_scraper_tab import AsyncScraperTab
+from async_scraper_tab_enhanced import AsyncScraperTab
 
 
 class MainWindow(QMainWindow):

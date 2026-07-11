@@ -1,133 +1,66 @@
-# Scrape Ratings — Hotel Data Tools
+# RatingsScraper — Plug & Play Guide
 
-A comprehensive PyQt6-based toolkit for scraping hotel data from multiple platforms and extranets.
+## ▶️ How to Run (Zero Setup Required)
 
-## Features
+### First Time on a New Machine
+1. **Copy the entire `scrape-ratings` folder** to the Desktop (or anywhere)
+2. **Double-click `INSTALL_AND_RUN.bat`**
+3. That's it — it will automatically:
+   - ✅ Install Python 3.11 (if not present)
+   - ✅ Install all required packages
+   - ✅ Download Chromium browser engine (~150MB, one-time)
+   - ✅ Launch the app
 
-**5 Independent Scraping Tools:**
+> ⏱ First run takes **3–5 minutes**. Every run after that is instant.
 
-1. **Ratings Scraper** — Extract hotel ratings from Booking.com, Agoda, Expedia, MakeMyTrip, Goibibo, and Hotels.com
-   - Multi-threaded scraping (configurable worker count, up to 100)
-   - CSV upload with flexible ID/Name/URL detection
-   - Incremental CSV export with real-time progress
-   - Checkpoint-based resume capability
+---
 
-2. **God Mode** — Advanced page analysis and link discovery
-   - Scan any webpage for all scrapeable data
-   - Auto-detect tables, lists, JSON-LD data, ratings, API endpoints
-   - Element picker for custom field extraction
-   - Link builder for dynamic URL generation
+### Every Time After (Already Set Up)
+- **Double-click `START.bat`** — launches immediately
 
-3. **Universal Scraper** — Extract data from hotel extranets
-   - Multi-platform support: Booking.com, MakeMyTrip, Goibibo, Agoda, Expedia, Hotels.com
-   - Extranet-specific field extraction (reservations, property info, reviews, finance, analytics)
-   - Group property portfolio support with recursive pagination
-   - Real-time incremental CSV/Excel export
-   - Session-based resume and crash recovery
-   - SQLite history logging
+---
 
-4. **Async Scraper** — High-performance async HTTP scraping
-   - Concurrency control (1-50 threads, default 10)
-   - Browser-like headers with random user agent rotation
-   - Anti-blocking delays (0.5-2s configurable)
-   - Optional API endpoint auto-discovery
-   - CSV export with structured data extraction
-   - Checkpoint system for progress tracking
+## 📁 Files Overview
 
-5. **Bulk OCM Generator** — Mass content generation
-   - Batch create and manage OCM (Online Channel Manager) entries
-   - CSV-based bulk operations
+| File | Purpose |
+|------|---------|
+| `INSTALL_AND_RUN.bat` | ⬅️ **First time only** — installs everything + launches |
+| `START.bat` | ⬅️ **Every day use** — quick launcher |
+| `BUILD_EXE.bat` | Builds a standalone `.exe` (for distribution) |
+| `app.py` | Main application entry point |
+| `dist/RatingsScraper.exe` | Pre-built standalone EXE (if available) |
 
-## Installation
+---
 
-```bash
-# Clone the repository
-git clone https://github.com/abhijeetyadav-Fab-Dev/scrape-ratings.git
-cd scrape-ratings
+## 💡 Want a True Single EXE?
 
-# Install dependencies
-pip install PyQt6 playwright httpx beautifulsoup4 lxml pandas aiofiles openpyxl
+If you want to share a single `.exe` file that needs zero setup:
 
-# Download Playwright browsers
-playwright install
+1. Run `BUILD_EXE.bat` **on your machine** (takes 3–5 min)
+2. Share `dist\RatingsScraper.exe` — it runs on any Windows PC with no Python needed
 
-# Run the application
-python app.py
-```
+> ⚠️ The EXE will be ~200–300MB because it bundles Python + all libraries
 
-## Quick Start
+---
 
-### Launch GUI Application
-```bash
-python app.py
-```
+## 🔧 Requirements (Handled Automatically)
 
-### Use Async Scraper Programmatically
-```python
-import asyncio
-from async_scraper_core import RatingScraper
+- Windows 10/11 (64-bit)
+- Internet connection on first run (to download Python + browser)
+- ~500MB free disk space
 
-async def main():
-    scraper = RatingScraper(max_concurrent=10, delay_range=(0.5, 2.0))
-    urls = ["https://example.com/page1", "https://example.com/page2"]
-    data = await scraper.scrape_urls(urls)
-    scraper.export_to_csv("output.csv")
+All Python packages installed automatically:
+- PyQt6, Playwright, httpx, pandas, beautifulsoup4, openpyxl, lxml, aiofiles
 
-asyncio.run(main())
-```
+---
 
-## Architecture
+## ❓ Troubleshooting
 
-- **app.py** — Main PyQt6 application with tabbed interface
-- **async_scraper_core.py** — Core async scraper engine
-- **async_scraper_tab.py** — PyQt6 GUI tab for async scraping
-- **ratings_tab.py** — Ratings scraper tab
-- **god_mode.py** — Page analysis tool
-- **universal_scraper.py** — Extranet scraper with multi-platform support
-- **ocm_tab.py** — Bulk OCM generator
+**App doesn't open after install?**
+→ Delete `.setup_complete` file and run `INSTALL_AND_RUN.bat` again
 
-## Configuration
+**"Python not found" after install?**
+→ Restart your PC and run `START.bat` again (PATH needs refresh)
 
-### Async Scraper Settings (in GUI)
-- **Max Concurrent Requests**: 1-50 (default: 10)
-- **API Discovery**: Toggle to auto-detect API endpoints
-- **Delay Range**: 0.5-2.0 seconds (built-in)
-
-### Data Storage
-- Exported files: `~/.scrape-ratings/exports/`
-- Checkpoints: `~/.scrape-ratings/checkpoints/`
-- Cookies: `~/.scrape-ratings/`
-- History: `~/.scrape-ratings/scrape_history.db`
-
-## Key Features
-
-✅ Multi-threaded/async operations  
-✅ Browser-like anti-blocking (headers, delays, user agents)  
-✅ Checkpoint-based progress tracking & resume  
-✅ Multiple export formats (CSV, Excel, JSON)  
-✅ Real-time progress monitoring  
-✅ Dark theme GUI with responsive design  
-✅ Comprehensive error logging  
-✅ Cross-platform support (Windows, macOS, Linux)  
-
-## Project Structure
-
-```
-scrape-ratings/
-├── app.py                    # Main application
-├── async_scraper_core.py     # Async HTTP scraper
-├── async_scraper_tab.py      # Async scraper GUI tab
-├── ratings_tab.py            # Ratings scraper tab
-├── god_mode.py               # Page analyzer tool
-├── universal_scraper.py      # Extranet scraper
-├── ocm_tab.py                # Bulk OCM generator
-├── ratings_platforms.py      # Platform-specific scrapers
-├── CLAUDE.md                 # Development guidelines
-├── session_history.md        # Session changelog
-└── test_csvs/                # Test data
-```
-
-## License
-
-© 2026 Scrape Ratings. All rights reserved.
-
+**Browser errors?**
+→ Run this in Command Prompt: `python -m playwright install chromium`

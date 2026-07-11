@@ -28,6 +28,9 @@ Thumbs.db
 *.spec
 nul
 *.bat
+!INSTALL_AND_RUN.bat
+!START.bat
+!RUN_WEB_APP.bat
 *.ps1
 *.html
 *.png
@@ -40,7 +43,7 @@ test_*.py
 debug_*.py
 probe_*.py
 capture_*.py
-web_app/
+# web_app/
 dry_run.py
 extreme_async_test.py
 find_mmt_apis.py
@@ -52,3 +55,8 @@ read_excel.py
 rewrite_run.py
 *.patch
 extract_initial_state.py
+.setup_complete
+Share Scraper.zip
+Share Scraper/
+test_hotels.csv
+

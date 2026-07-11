@@ -1449,74 +1449,167 @@ class BookingExtranetSource(ExtranetSource):
         rows = []
 
         # Check if the page has an indicator of "no active promotions"
+        # FIX #1: Make detection more specific to avoid false positives
+        # - Only check within the main content area, not full body
+        # - Require the text to appear in a specific context (empty state container)
+        # - Check for positive indicators of promotions existing first
         try:
-            body_text = page.inner_text("body").lower()
+            # First check if there ARE promotions visible (positive indicator)
+            main_content = page.query_selector("main, [class*='content'], [class*='container'], .bui-main-layout__content")
+            check_area = main_content if main_content else page
+            body_text = check_area.inner_text().lower() if check_area else ""
+
+            # Positive indicators that promotions DO exist
+            promo_exists_indicators = [
+                "active promotion", "your promotion", "promotion name",
+                "discount %", "bookable period", "stay dates", "room nights",
+                "average daily rate", "cancelled room nights", "promo-",
+                "data-promo", "offer-card", "promotion-card"
+            ]
+            has_promo_content = any(ind in body_text for ind in promo_exists_indicators)
+
+            # Negative indicators (only trust if no positive content found)
             no_promo_indicators = [
                 "don't have any active promotions",
                 "no active promotions",
                 "no promotions running",
                 "you don't have any promotions",
+                "create your first promotion",
+                "get started with promotions",
             ]
-            if any(ind in body_text for ind in no_promo_indicators):
-                return []
-        except Exception:
-            pass
 
-        # Try table-based extraction first
+            matched_negative = [ind for ind in no_promo_indicators if ind in body_text]
+            if matched_negative and not has_promo_content:
+                print(f"DEBUG [promotions]: No promotions indicator found (negative match, no positive content): {matched_negative}")
+                return []
+            elif matched_negative and has_promo_content:
+                print(f"DEBUG [promotions]: Negative indicator found but positive content exists - continuing: {matched_negative}")
+        except Exception as e:
+            print(f"DEBUG [promotions]: Error in no-promo check: {e}")
+
+        # FIX #2: Improved table extraction - try multiple table locations
+        print(f"DEBUG [promotions]: Attempting table extraction...")
         table_rows = self._extract_table_fields(page, field_keys, {
-            "name": "promo_Name", "promotion": "promo_Name", "offer": "promo_Name",
-            "discount": "promo_Discount", "%": "promo_Discount",
-            "bookable period": "promo_Bookable_period", "booking period": "promo_Bookable_period",
-            "stay dates": "promo_Stay_dates", "stay period": "promo_Stay_dates",
-            "bookings": "promo_Bookings",
-            "room nights": "promo_Room_nights", "nights": "promo_Room_nights",
-            "average daily rate": "promo_Average_daily_rate", "adr": "promo_Average_daily_rate",
-            "revenue": "promo_Revenue",
-            "cancelled room nights": "promo_Cancelled_room_nights", "cancelled nights": "promo_Cancelled_room_nights",
-            "status": "promo_Status",
+            "name": "promo_Name", "promotion": "promo_Name", "offer": "promo_Name", "title": "promo_Name",
+            "discount": "promo_Discount", "%": "promo_Discount", "discount %": "promo_Discount", "amount": "promo_Discount",
+            "bookable period": "promo_Bookable_period", "booking period": "promo_Bookable_period", "valid from": "promo_Bookable_period", "from": "promo_Bookable_period",
+            "stay dates": "promo_Stay_dates", "stay period": "promo_Stay_dates", "valid to": "promo_Stay_dates", "to": "promo_Stay_dates", "dates": "promo_Stay_dates",
+            "bookings": "promo_Bookings", "reservations": "promo_Bookings",
+            "room nights": "promo_Room_nights", "nights": "promo_Room_nights", "room night": "promo_Room_nights",
+            "average daily rate": "promo_Average_daily_rate", "adr": "promo_Average_daily_rate", "avg daily rate": "promo_Average_daily_rate",
+            "revenue": "promo_Revenue", "total revenue": "promo_Revenue",
+            "cancelled room nights": "promo_Cancelled_room_nights", "cancelled nights": "promo_Cancelled_room_nights", "cancellations": "promo_Cancelled_room_nights",
+            "status": "promo_Status", "state": "promo_Status",
         })
         if table_rows:
+            print(f"DEBUG [promotions]: Table extraction SUCCESS - got {len(table_rows)} rows")
             return table_rows
+        else:
+            print(f"DEBUG [promotions]: Table extraction returned empty, trying card fallback...")
 
-        # Fallback: parse promotion cards with a line classifier
-        try:
-            items = page.query_selector_all(
-                ".promo-card, .offer-card, [data-promo-id], "
-                "[class*='promo-card'], [class*='offer-card'], [class*='promotion-card'], "
-                "div[class*='promo-row'], div[class*='offer-row']"
-            )
-            for item in items:
+        # FIX #3: Updated CSS selectors for current Booking.com structure
+        # Try multiple selector strategies in order of specificity
+        selector_strategies = [
+            # Strategy 1: Data attributes (most stable)
+            "[data-testid*='promo'], [data-testid*='offer'], [data-promo-id], [data-offer-id]",
+            # Strategy 2: BUI component classes (Booking.com's design system)
+            "[class*='PromotionCard'], [class*='OfferCard'], [class*='promotion-card'], [class*='offer-card']",
+            # Strategy 3: Table row patterns
+            "tbody tr[class*='promo'], tbody tr[class*='offer'], tr[data-promo], tr[data-offer]",
+            # Strategy 4: Generic card/row patterns
+            "[class*='promo-row'], [class*='offer-row'], [class*='promo-item'], [class*='offer-item']",
+            # Strategy 5: List/group containers
+            "[class*='promotion-list'] > *, [class*='offer-list'] > *, [class*='promos-container'] > *",
+            # Strategy 6: Original fallback (broad)
+            ".promo-card, .offer-card, [data-promo-id], [class*='promo-card'], [class*='offer-card'], [class*='promotion-card'], div[class*='promo-row'], div[class*='offer-row']",
+        ]
+
+        items = []
+        for i, selector in enumerate(selector_strategies):
+            try:
+                found = page.query_selector_all(selector)
+                if found and len(found) > 0:
+                    items = found
+                    print(f"DEBUG [promotions]: Selector strategy {i+1} matched {len(items)} elements: {selector}")
+                    break
+                else:
+                    print(f"DEBUG [promotions]: Selector strategy {i+1} returned 0 elements: {selector}")
+            except Exception as e:
+                print(f"DEBUG [promotions]: Selector strategy {i+1} error: {e}")
+
+        if not items:
+            print(f"DEBUG [promotions]: No promotion elements found with any selector strategy")
+            return rows
+
+        # Fallback: parse promotion cards with improved line classifier
+        for idx, item in enumerate(items):
+            try:
                 row = {}
                 full_text = item.inner_text().strip()
                 if not full_text or len(full_text) < 10:
+                    print(f"DEBUG [promotions]: Skipping item {idx} - text too short: '{full_text[:50]}'")
                     continue
+
+                print(f"DEBUG [promotions]: Processing item {idx}: '{full_text[:100]}...'")
                 lines = [l.strip() for l in full_text.split("\n") if l.strip()]
-                
-                # Basic classification of lines
+
+                # Improved classification with more patterns
                 discount = ""
                 name = ""
                 dates = []
                 status = "Active"
                 conditions = ""
-                
-                for idx, line in enumerate(lines):
+                bookings = ""
+                room_nights = ""
+                adr = ""
+                revenue = ""
+                cancelled_nights = ""
+
+                for line_idx, line in enumerate(lines):
                     l_lower = line.lower()
-                    if "%" in line or any(curr in line for curr in ["$", "€", "£", "rs", "inr"]) or "off" in l_lower or "discount" in l_lower:
-                        discount = line
-                    elif "valid" in l_lower or "from" in l_lower or "to" in l_lower or any(m in l_lower for m in ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
-                        dates.append(line)
-                    elif "status" in l_lower or "ended" in l_lower or "inactive" in l_lower or "expired" in l_lower:
+
+                    # Discount detection
+                    if any(curr in line for curr in ["%", "$", "€", "£", "₹", "rs", "inr"]) or \
+                       any(kw in l_lower for kw in ["off", "discount", "save", "% off"]):
+                        if not discount or len(line) < len(discount):  # Prefer shorter, cleaner match
+                            discount = line
+
+                    # Date detection - broader patterns
+                    elif any(kw in l_lower for kw in ["valid", "from", "to", "between", "until", "through", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec", "2024", "2025", "2026", "/", "-"]):
+                        # Filter out lines that are clearly not date ranges
+                        if not any(skip in l_lower for skip in ["status", "bookings", "nights", "revenue", "adr", "rate", "cancel"]):
+                            dates.append(line)
+
+                    # Status detection
+                    elif any(kw in l_lower for kw in ["status", "state", "ended", "inactive", "expired", "active", "running", "paused", "draft", "scheduled"]):
                         status = line
-                    elif "terms" in l_lower or "condition" in l_lower or "min stay" in l_lower:
+
+                    # Conditions/terms
+                    elif any(kw in l_lower for kw in ["terms", "condition", "min stay", "minimum stay", "min. stay", "lead time"]):
                         conditions = line
-                    elif idx == 0:
+
+                    # Bookings / metrics
+                    elif "booking" in l_lower and not any(skip in l_lower for skip in ["period", "date", "window", "engine"]):
+                        bookings = line
+                    elif "night" in l_lower and "room" in l_lower:
+                        room_nights = line
+                    elif "adr" in l_lower or "average daily rate" in l_lower or "avg rate" in l_lower:
+                        adr = line
+                    elif "revenue" in l_lower and "total" in l_lower:
+                        revenue = line
+                    elif "cancel" in l_lower and "night" in l_lower:
+                        cancelled_nights = line
+
+                    # Name - first meaningful line that isn't a metric
+                    elif line_idx == 0 and not any(kw in l_lower for kw in ["%", "$", "€", "£", "status", "valid", "from", "to", "book", "night", "revenue", "adr", "cancel"]):
                         name = line
-                    elif idx == 1 and not name:
+                    elif line_idx == 1 and not name and not any(kw in l_lower for kw in ["%", "$", "€", "£", "status", "valid", "from", "to"]):
                         name = line
-                        
+
                 # Map extracted variables to the requested field keys
                 row["promo_Name"] = name or (lines[0] if lines else "Promotion")
-                row["promo_Discount"] = discount or "No Discount"
+                row["promo_Discount"] = discount or "See details"
+
                 if len(dates) >= 2:
                     row["promo_Bookable_period"] = dates[0]
                     row["promo_Stay_dates"] = dates[1]
@@ -1526,18 +1619,26 @@ class BookingExtranetSource(ExtranetSource):
                 else:
                     row["promo_Bookable_period"] = "N/A"
                     row["promo_Stay_dates"] = "Always active"
-                row["promo_Bookings"] = ""
-                row["promo_Room_nights"] = ""
-                row["promo_Average_daily_rate"] = ""
-                row["promo_Revenue"] = ""
-                row["promo_Cancelled_room_nights"] = ""
-                row["promo_Status"] = status
-                
-                if row:
-                    rows.append(row)
-        except Exception:
-            pass
 
+                row["promo_Bookings"] = bookings
+                row["promo_Room_nights"] = room_nights
+                row["promo_Average_daily_rate"] = adr
+                row["promo_Revenue"] = revenue
+                row["promo_Cancelled_room_nights"] = cancelled_nights
+                row["promo_Status"] = status
+
+                # Only add if we have at least a name or discount
+                if row["promo_Name"] != "Promotion" or discount:
+                    rows.append(row)
+                    print(f"DEBUG [promotions]: Added row for '{row['promo_Name']}' with discount='{row['promo_Discount']}'")
+                else:
+                    print(f"DEBUG [promotions]: Skipped item {idx} - insufficient data")
+
+            except Exception as e:
+                print(f"DEBUG [promotions]: Error processing item {idx}: {e}")
+                continue
+
+        print(f"DEBUG [promotions]: Final result - {len(rows)} rows extracted")
         return rows
 
     def _fast_regex_extract(self, html: str, url: str, field_keys: list[str], section: str) -> list[dict]:
