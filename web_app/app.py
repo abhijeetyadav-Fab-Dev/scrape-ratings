@@ -22,6 +22,9 @@ ScrapeHistoryManager.init_db()
 
 app = Flask(__name__)
 active_jobs = {} # session_id -> WebScrapeWorker
+active_ratings_jobs = {} # session_id -> WebRatingsWorker
+active_async_jobs = {} # session_id -> WebAsyncScraperWorker
+active_ocm_jobs = {} # session_id -> WebOCMWorker
 
 class WebScrapeWorker(threading.Thread):
     def __init__(self, job, session_id):
@@ -497,6 +500,550 @@ class WebScrapeWorker(threading.Thread):
                 pass
             
         self.finished_state = True
+
+
+class WebRatingsWorker(threading.Thread):
+    def __init__(self, items, session_id):
+        super().__init__()
+        self.items = items
+        self.session_id = session_id
+        self._stop = False
+        self.logs = []
+        self.progress_val = 0
+        self.progress_max = len(items)
+        self.progress_status = "Waiting..."
+        self.finished_state = False
+        self.output_path = ""
+
+    def log(self, msg):
+        self.logs.append(msg)
+        print(f"[RATINGS][{self.session_id}] {msg}")
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        self.log(f"Starting background ratings scrape for {len(self.items)} hotels...")
+        self.progress_status = "Initializing..."
+        
+        import asyncio
+        from async_api_scraper import AsyncScraperEngine
+        import db_cache
+        
+        total = len(self.items)
+        self.progress_max = total
+        
+        downloads_dir = Path.home() / "Downloads"
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        self.output_path = str(downloads_dir / f"ratings_output_{self.session_id}.csv")
+        
+        import csv
+        results = [None] * total
+        processed_count = 0
+        
+        with open(self.output_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['name', 'city', 'url', 'rating', 'review_count', 'source', 'fail_reason'])
+            writer.writeheader()
+            
+        try:
+            self.progress_status = "Initiating high-speed API engine..."
+            scraper = AsyncScraperEngine(concurrency_limit=50)
+            
+            async_items = []
+            for i, item in enumerate(self.items):
+                if self._stop:
+                    break
+                url = item.get('url', '').strip()
+                name = item.get('name', '')
+                city = item.get('city', '')
+                source = item.get('source', '')
+                identifier = url if url else f"{name}:{city}"
+                
+                cached = db_cache.get_cached_rating(source or 'booking', identifier)
+                if cached:
+                    final_res = {
+                        'rating': cached['rating'] or 'N/A',
+                        'review_count': cached['review_count'] or 'N/A',
+                        'source': cached['scraped_source'],
+                        'fail_reason': 'Cached'
+                    }
+                    results[i] = final_res
+                    processed_count += 1
+                    self.progress_val = processed_count
+                    self.progress_status = f"Processed {processed_count}/{total} (Cached)"
+                    self.log(f"Cache Hit: {name} -> {cached['rating']}")
+                    continue
+                
+                item['idx'] = i
+                item['identifier'] = identifier
+                async_items.append(item)
+                
+            if async_items and not self._stop:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self.progress_status = f"Scraping {len(async_items)} hotels via API engine..."
+                self.log(f"Sending {len(async_items)} items to async batch scraper...")
+                batch_results = loop.run_until_complete(scraper.scrape_batch(async_items))
+                loop.close()
+                
+                for res in batch_results:
+                    i = res.get('item_idx')
+                    if i is not None:
+                        results[i] = {
+                            'rating': res.get('rating') or 'N/A',
+                            'review_count': res.get('review_count') or 'N/A',
+                            'source': res.get('source') or '',
+                            'fail_reason': res.get('fail_reason') or ''
+                        }
+                        processed_count += 1
+                        self.progress_val = processed_count
+                        self.progress_status = f"Scraped {processed_count}/{total}"
+                        self.log(f"Done: {self.items[i].get('name')} -> Rating: {res.get('rating')}")
+                        
+            with open(self.output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=['name', 'city', 'url', 'rating', 'review_count', 'source', 'fail_reason'])
+                writer.writeheader()
+                for idx, item in enumerate(self.items):
+                    r = results[idx] if idx < len(results) and results[idx] else {
+                        'rating': 'N/A', 'review_count': 'N/A', 'source': '', 'fail_reason': 'Stopped'
+                    }
+                    writer.writerow({
+                        'name': item.get('name', ''),
+                        'city': item.get('city', ''),
+                        'url': item.get('url', ''),
+                        'rating': r.get('rating', 'N/A'),
+                        'review_count': r.get('review_count', 'N/A'),
+                        'source': r.get('source', ''),
+                        'fail_reason': r.get('fail_reason', '')
+                    })
+                    
+            self.log(f"Ratings scraping complete! Saved to {self.output_path}")
+            self.progress_status = "Finished"
+            self.finished_state = True
+            
+        except Exception as e:
+            self.log(f"ERROR: {e}")
+            self.progress_status = f"Error: {e}"
+            self.finished_state = True
+
+
+class WebAsyncScraperWorker(threading.Thread):
+    def __init__(self, urls, concurrency, sources, api_discovery, session_id):
+        super().__init__()
+        self.urls = urls
+        self.concurrency = concurrency
+        self.sources = sources
+        self.api_discovery = api_discovery
+        self.session_id = session_id
+        self._stop = False
+        self.logs = []
+        self.progress_val = 0
+        self.progress_max = len(urls)
+        self.progress_status = "Waiting..."
+        self.finished_state = False
+        self.output_path = ""
+
+    def log(self, msg):
+        self.logs.append(msg)
+        print(f"[ASYNC][{self.session_id}] {msg}")
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        self.log(f"Starting background Async Scraper for {len(self.urls)} URLs...")
+        self.progress_status = "Initializing..."
+        
+        import asyncio
+        from async_scraper_core import RatingScraper
+        
+        total = len(self.urls)
+        self.progress_max = total
+        
+        downloads_dir = Path.home() / "Downloads"
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        self.output_path = str(downloads_dir / f"async_output_{self.session_id}.csv")
+        
+        scraper = RatingScraper(max_concurrent=self.concurrency)
+        
+        def cb(index, total_count, url, result):
+            self.progress_val = index
+            self.progress_status = f"Scraped {index}/{total_count}: {url}"
+            self.log(f"Done: {url} -> {result.get('status') or 'Success'}")
+            
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            self.progress_status = f"Scraping {total} URLs with concurrency {self.concurrency}..."
+            results = loop.run_until_complete(scraper.scrape_urls(self.urls, progress_callback=cb))
+            
+            import csv
+            with open(self.output_path, 'w', newline='', encoding='utf-8') as f:
+                if results:
+                    keys = results[0].keys()
+                    writer = csv.DictWriter(f, fieldnames=keys)
+                    writer.writeheader()
+                    writer.writerows(results)
+                else:
+                    f.write("url,status,error\n")
+                    
+            self.log(f"Async scraping completed! Saved to {self.output_path}")
+            self.progress_status = "Finished"
+            self.finished_state = True
+            
+        except Exception as e:
+            self.log(f"ERROR: {e}")
+            self.progress_status = f"Error: {e}"
+            self.finished_state = True
+        finally:
+            loop.close()
+
+
+class WebOCMWorker(threading.Thread):
+    def __init__(self, items, output_dir, session_id):
+        super().__init__()
+        self.items = items
+        self.output_dir = Path(output_dir)
+        self.session_id = session_id
+        self._stop = False
+        self.logs = []
+        self.progress_val = 0
+        self.progress_max = len(items)
+        self.progress_status = "Waiting..."
+        self.finished_state = False
+
+    def log(self, msg):
+        self.logs.append(msg)
+        print(f"[OCM][{self.session_id}] {msg}")
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        self.log("🚀 Starting Bulk OCM Generation Web Worker...")
+        self.progress_status = "Initializing..."
+        import os
+        import base64
+        import re
+        from playwright.sync_api import sync_playwright
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        index_html_path = Path("C:/Users/CS05180/Desktop/ocm-generator/index.html")
+        if not index_html_path.exists():
+            self.log("❌ Error: Could not find ocm-generator index.html at C:/Users/CS05180/Desktop/ocm-generator/index.html")
+            self.progress_status = "Error: Template not found"
+            self.finished_state = True
+            return
+            
+        url = index_html_path.as_uri()
+        self.log(f"📄 Loaded local template: {url}")
+        
+        total = len(self.items)
+        success_count = 0
+        self.progress_max = total
+        
+        try:
+            with sync_playwright() as p:
+                self.log("🌐 Launching headless browser context...")
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"]
+                )
+                context = browser.new_context(
+                    viewport={'width': 1280, 'height': 900},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = context.new_page()
+                page.goto(url)
+                
+                for idx, item in enumerate(self.items):
+                    if self._stop:
+                        self.log("🛑 Generation stopped by user.")
+                        break
+                        
+                    self.progress_val = idx + 1
+                    self.progress_status = f"Generating {idx+1}/{total}..."
+                    
+                    owner_name = item.get("ownerName", "").strip()
+                    hotel_name = item.get("hotelName", "").strip()
+                    address = item.get("address", "").strip()
+                    city = item.get("city", "").strip()
+                    auth_date = item.get("authDate", "").strip()
+                    auth_hour = item.get("authHour", "12").strip()
+                    auth_minute = item.get("authMinute", "00").strip()
+                    ampm = item.get("ampm", "AM").strip().upper()
+                    owner_email = item.get("ownerEmail", "").strip()
+                    owner_phone = item.get("ownerPhone", "").strip()
+                    email_subject = item.get("emailSubject", "Letter of Authorization").strip()
+                    recipient_name = item.get("recipientName", "Kiran Kumar").strip()
+                    recipient_email = item.get("recipientEmail", "kiran.kumar@fabhotels.com").strip()
+                    fmt = str(item.get("format", "1")).strip()
+                    
+                    if not owner_name or not hotel_name or not address or not city:
+                        self.log(f"⚠️ [Row {idx+1}] Skipping: Missing required fields.")
+                        continue
+                        
+                    self.log(f"✍️ [Row {idx+1}/{total}] Preparing PDF for '{hotel_name}'...")
+                    
+                    try:
+                        page.evaluate("""(data) => {
+                            document.getElementById('ownerName').value = data.ownerName;
+                            document.getElementById('hotelName').value = data.hotelName;
+                            document.getElementById('address').value = data.address;
+                            document.getElementById('city').value = data.city;
+                            document.getElementById('authDate').value = data.authDate;
+                            document.getElementById('authHour').value = data.authHour;
+                            document.getElementById('authMinute').value = data.authMinute;
+                            
+                            document.querySelectorAll('.ampm-btn').forEach(btn => {
+                                const isActive = btn.dataset.ampm === data.ampm;
+                                btn.classList.toggle('active', isActive);
+                                btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
+                            });
+                            
+                            document.getElementById('ownerEmail').value = data.ownerEmail;
+                            document.getElementById('ownerPhone').value = data.ownerPhone;
+                            document.getElementById('emailSubject').value = data.emailSubject;
+                            
+                            const fmtIdx = parseInt(data.format) - 1;
+                            document.querySelectorAll('.format-option').forEach((o, i) => {
+                                o.classList.toggle('active', i === fmtIdx);
+                            });
+                            
+                            window.selectedFormat = parseInt(data.format);
+                            
+                            document.querySelectorAll('.field-format3').forEach(el => {
+                                el.style.display = window.selectedFormat === 3 ? 'block' : 'none';
+                            });
+                            
+                            if (window.selectedFormat === 3) {
+                                document.getElementById('recipientName').value = data.recipientName;
+                                document.getElementById('recipientEmail').value = data.recipientEmail;
+                            }
+                            
+                            const form = document.getElementById('ocmForm');
+                            form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+                        }""", {
+                            "ownerName": owner_name,
+                            "hotelName": hotel_name,
+                            "address": address,
+                            "city": city,
+                            "authDate": auth_date,
+                            "authHour": auth_hour,
+                            "authMinute": auth_minute,
+                            "ampm": ampm,
+                            "ownerEmail": owner_email,
+                            "ownerPhone": owner_phone,
+                            "emailSubject": email_subject,
+                            "recipientName": recipient_name,
+                            "recipientEmail": recipient_email,
+                            "format": fmt
+                        })
+                        
+                        page.wait_for_timeout(500)
+                        
+                        pdf_datauri = page.evaluate("window.generatedDoc.output('datauristring')")
+                        if not pdf_datauri or "," not in pdf_datauri:
+                            raise Exception("Failed to retrieve generated PDF from browser context.")
+                            
+                        base64_pdf = pdf_datauri.split(",")[1]
+                        pdf_bytes = base64.b64decode(base64_pdf)
+                        
+                        safe_hotel_name = re.sub(r'[\\/*?:"<>|]', "", hotel_name)
+                        filename = f"FabHotel_{safe_hotel_name}_OCM_Format_{fmt}.pdf"
+                        dest_path = self.output_dir / filename
+                        
+                        with open(dest_path, "wb") as f:
+                            f.write(pdf_bytes)
+                            
+                        self.log(f"✅ Saved PDF to: {dest_path}")
+                        success_count += 1
+                        
+                    except Exception as e:
+                        self.log(f"❌ [Row {idx+1}] PDF generation failed: {e}")
+                        
+                browser.close()
+                
+        except Exception as e:
+            self.log(f"❌ Playwright execution error: {e}")
+            self.progress_status = f"Error: {e}"
+            self.finished_state = True
+            return
+            
+        self.log(f"\n🎉 Bulk OCM Generation Completed! Generated {success_count} of {total} PDFs.")
+        self.progress_status = "Finished"
+        self.finished_state = True
+
+
+# ── Ratings Scraper Routes ────────────────────────────────
+@app.route("/api/ratings/start", methods=["POST"])
+def ratings_start():
+    data = request.json or {}
+    items = data.get("items", [])
+    if not items:
+        return jsonify({"error": "No items provided"}), 400
+        
+    session_id = f"ratings_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    worker = WebRatingsWorker(items, session_id)
+    active_ratings_jobs[session_id] = worker
+    worker.start()
+    
+    return jsonify({
+        "session_id": session_id,
+        "status": "started",
+        "message": f"Ratings scraper started for {len(items)} hotels"
+    })
+
+@app.route("/api/ratings/status/<session_id>")
+def ratings_status(session_id):
+    worker = active_ratings_jobs.get(session_id)
+    if not worker:
+        return jsonify({"error": "Session not found"}), 404
+        
+    return jsonify({
+        "session_id": session_id,
+        "finished": worker.finished_state,
+        "status_text": worker.progress_status,
+        "progress_val": worker.progress_val,
+        "progress_max": worker.progress_max,
+        "logs": worker.logs
+    })
+
+@app.route("/api/ratings/stop/<session_id>", methods=["POST"])
+def ratings_stop(session_id):
+    worker = active_ratings_jobs.get(session_id)
+    if worker:
+        worker.stop()
+        return jsonify({"message": "Stop request sent to ratings worker"})
+    return jsonify({"error": "Active session not found"}), 404
+
+@app.route("/api/ratings/download/<session_id>")
+def ratings_download(session_id):
+    worker = active_ratings_jobs.get(session_id)
+    if worker and worker.output_path and os.path.exists(worker.output_path):
+        return send_file(worker.output_path, as_attachment=True)
+    return jsonify({"error": "File not found"}), 404
+
+
+# ── God Mode Routes ──────────────────────────────────────
+@app.route("/api/godmode/scan", methods=["POST"])
+def godmode_scan():
+    data = request.json or {}
+    url = data.get("url")
+    if not url:
+        return jsonify({"error": "Missing URL"}), 400
+        
+    from god_mode import PageScanner
+    scanner = PageScanner()
+    try:
+        result = scanner.scan(url)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Async Scraper Routes ─────────────────────────────────
+@app.route("/api/async_scraper/start", methods=["POST"])
+def async_scraper_start():
+    data = request.json or {}
+    urls = data.get("urls", [])
+    concurrency = int(data.get("concurrency", 10))
+    sources = data.get("sources", "All")
+    api_discovery = bool(data.get("api_discovery", False))
+    
+    if not urls:
+        return jsonify({"error": "No URLs provided"}), 400
+        
+    session_id = f"async_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    worker = WebAsyncScraperWorker(urls, concurrency, sources, api_discovery, session_id)
+    active_async_jobs[session_id] = worker
+    worker.start()
+    
+    return jsonify({
+        "session_id": session_id,
+        "status": "started",
+        "message": f"Async scraper started for {len(urls)} URLs"
+    })
+
+@app.route("/api/async_scraper/status/<session_id>")
+def async_scraper_status(session_id):
+    worker = active_async_jobs.get(session_id)
+    if not worker:
+        return jsonify({"error": "Session not found"}), 404
+        
+    return jsonify({
+        "session_id": session_id,
+        "finished": worker.finished_state,
+        "status_text": worker.progress_status,
+        "progress_val": worker.progress_val,
+        "progress_max": worker.progress_max,
+        "logs": worker.logs
+    })
+
+@app.route("/api/async_scraper/stop/<session_id>", methods=["POST"])
+def async_scraper_stop(session_id):
+    worker = active_async_jobs.get(session_id)
+    if worker:
+        worker.stop()
+        return jsonify({"message": "Stop request sent to async worker"})
+    return jsonify({"error": "Active session not found"}), 404
+
+@app.route("/api/async_scraper/download/<session_id>")
+def async_scraper_download(session_id):
+    worker = active_async_jobs.get(session_id)
+    if worker and worker.output_path and os.path.exists(worker.output_path):
+        return send_file(worker.output_path, as_attachment=True)
+    return jsonify({"error": "File not found"}), 404
+
+
+# ── Bulk OCM Generator Routes ─────────────────────────────
+@app.route("/api/ocm/start", methods=["POST"])
+def ocm_start():
+    data = request.json or {}
+    items = data.get("items", [])
+    output_dir = data.get("output_dir", "")
+    
+    if not items:
+        return jsonify({"error": "No items provided"}), 400
+        
+    if not output_dir:
+        output_dir = str(Path.home() / "Downloads" / "Generated_OCM")
+        
+    session_id = f"ocm_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    worker = WebOCMWorker(items, output_dir, session_id)
+    active_ocm_jobs[session_id] = worker
+    worker.start()
+    
+    return jsonify({
+        "session_id": session_id,
+        "status": "started",
+        "message": f"Bulk OCM generation started for {len(items)} items"
+    })
+
+@app.route("/api/ocm/status/<session_id>")
+def ocm_status(session_id):
+    worker = active_ocm_jobs.get(session_id)
+    if not worker:
+        return jsonify({"error": "Session not found"}), 404
+        
+    return jsonify({
+        "session_id": session_id,
+        "finished": worker.finished_state,
+        "status_text": worker.progress_status,
+        "progress_val": worker.progress_val,
+        "progress_max": worker.progress_max,
+        "logs": worker.logs
+    })
+
+@app.route("/api/ocm/stop/<session_id>", methods=["POST"])
+def ocm_stop(session_id):
+    worker = active_ocm_jobs.get(session_id)
+    if worker:
+        worker.stop()
+        return jsonify({"message": "Stop request sent to OCM worker"})
+    return jsonify({"error": "Active session not found"}), 404
+
 
 @app.route("/")
 def index():

@@ -1,0 +1,1461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hotel Data Tools — Pro Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: radial-gradient(circle at top right, #1e1b4b, #09090b);
+            color: #f4f4f5;
+        }
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.45);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .glass-card {
+            background: rgba(30, 41, 59, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .glass-card:hover {
+            background: rgba(30, 41, 59, 0.5);
+            border-color: rgba(59, 130, 246, 0.3);
+            transform: translateY(-2px);
+        }
+        .glass-card.active {
+            background: rgba(59, 130, 246, 0.15);
+            border-color: #3b82f6;
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.2);
+        }
+        .terminal-font {
+            font-family: 'Fira Code', monospace;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.3);
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .tab-btn {
+            border-bottom: 2px solid transparent;
+        }
+        .tab-btn.active {
+            border-color: #3b82f6;
+            color: #3b82f6;
+            background: rgba(59, 130, 246, 0.05);
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4 md:p-8 flex flex-col items-center">
+
+    <!-- Main Container -->
+    <div class="w-full max-w-6xl space-y-8">
+        
+        <!-- Header -->
+        <header class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 pb-6 border-b border-zinc-800">
+            <div>
+                <h1 class="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 via-indigo-400 to-emerald-400">
+                    <i class="fa-solid fa-hotel mr-2 text-indigo-400"></i>Hotel Data Tools
+                </h1>
+                <p class="text-zinc-400 text-sm mt-1">Multi-tool Scraper, Ratings, God Mode, & Bulk Generator</p>
+            </div>
+            
+            <div class="flex items-center space-x-4">
+                <div class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-emerald-950/40 border border-emerald-500/20">
+                    <span class="relative flex h-2.5 w-2.5">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                    </span>
+                    <span class="text-xs font-semibold text-emerald-400 tracking-wider uppercase">Local Engine Connected</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs Bar -->
+        <div class="flex border-b border-zinc-800 overflow-x-auto space-x-1 py-1 custom-scrollbar">
+            <button id="nav-ratings" onclick="switchTab('ratings')" class="tab-btn active px-5 py-3 rounded-t-lg text-sm font-semibold transition text-zinc-400 hover:text-zinc-200 flex items-center gap-2 whitespace-nowrap">
+                <i class="fa-solid fa-star"></i>Ratings Scraper
+            </button>
+            <button id="nav-godmode" onclick="switchTab('godmode')" class="tab-btn px-5 py-3 rounded-t-lg text-sm font-semibold transition text-zinc-400 hover:text-zinc-200 flex items-center gap-2 whitespace-nowrap">
+                <i class="fa-solid fa-eye"></i>God Mode (Scanner)
+            </button>
+            <button id="nav-universal" onclick="switchTab('universal')" class="tab-btn px-5 py-3 rounded-t-lg text-sm font-semibold transition text-zinc-400 hover:text-zinc-200 flex items-center gap-2 whitespace-nowrap">
+                <i class="fa-solid fa-wand-magic-sparkles"></i>Universal Scraper
+            </button>
+            <button id="nav-async" onclick="switchTab('async')" class="tab-btn px-5 py-3 rounded-t-lg text-sm font-semibold transition text-zinc-400 hover:text-zinc-200 flex items-center gap-2 whitespace-nowrap">
+                <i class="fa-solid fa-bolt-lightning"></i>Async Scraper
+            </button>
+            <button id="nav-ocm" onclick="switchTab('ocm')" class="tab-btn px-5 py-3 rounded-t-lg text-sm font-semibold transition text-zinc-400 hover:text-zinc-200 flex items-center gap-2 whitespace-nowrap">
+                <i class="fa-solid fa-file-pdf"></i>Bulk OCM Generator
+            </button>
+        </div>
+
+        <!-- ──────────────────────────────────────────────────────── -->
+        <!-- TAB 1: RATINGS SCRAPER PANEL                             -->
+        <!-- ──────────────────────────────────────────────────────── -->
+        <section id="ratings-pane" class="tab-pane space-y-8">
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                <!-- Left configuration column (7 cols) -->
+                <div class="lg:col-span-7 space-y-8">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
+                        <h2 class="text-lg font-semibold text-zinc-300 flex items-center">
+                            <i class="fa-solid fa-list mr-2.5 text-blue-400"></i>Configure Ratings Scraper
+                        </h2>
+                        
+                        <div class="space-y-2">
+                            <label class="text-sm font-medium text-zinc-400 block font-semibold">Manual Paste Input (One per line)</label>
+                            <textarea id="ratings-manual-input" rows="6" class="w-full p-4 rounded-xl bg-zinc-950/40 border border-zinc-800 text-zinc-300 focus:outline-none focus:border-blue-500 terminal-font text-xs custom-scrollbar" placeholder="Paste Booking.com URLs, MMT URLs, Agoda URLs, or hotel names..."></textarea>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="text-sm font-medium text-zinc-400 block mb-2">Platform Selection</label>
+                                <select id="ratings-platform" class="w-full p-3 rounded-xl bg-zinc-950/40 border border-zinc-800 text-zinc-300 focus:outline-none focus:border-blue-500">
+                                    <option value="quick">Quick Search (Auto Detect)</option>
+                                    <option value="booking">Booking.com</option>
+                                    <option value="mmt">MakeMyTrip</option>
+                                    <option value="agoda">Agoda</option>
+                                    <option value="expedia">Expedia</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label class="text-sm font-medium text-zinc-400 block mb-2">Max Workers (Concurrency)</label>
+                                <input type="number" id="ratings-workers" min="1" max="50" value="10" class="w-full p-3 rounded-xl bg-zinc-950/40 border border-zinc-800 text-zinc-300 focus:outline-none focus:border-blue-500">
+                            </div>
+                        </div>
+
+                        <div class="flex items-center justify-between p-4 rounded-xl bg-zinc-950/20 border border-zinc-850">
+                            <div>
+                                <span class="font-medium text-sm text-zinc-300 block">Bulk CSV File Import</span>
+                                <span class="text-zinc-500 text-xs">Import a CSV of hotel links & names</span>
+                            </div>
+                            <input type="file" id="ratings-file" accept=".csv,.xlsx" class="hidden" onchange="loadRatingsCSV(event)">
+                            <button onclick="document.getElementById('ratings-file').click()" class="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm font-bold transition flex items-center gap-1">
+                                <i class="fa-solid fa-file-csv text-blue-400"></i>Choose File
+                            </button>
+                        </div>
+                        <div id="ratings-file-status" class="text-xs text-zinc-400 italic hidden"></div>
+
+                        <button id="ratings-start-btn" onclick="startRatingsScrape()" class="w-full py-4 rounded-xl font-bold bg-blue-600 hover:bg-blue-500 text-white transition shadow-lg transform hover:-translate-y-0.5 active:translate-y-0">
+                            🚀 Start Ratings Scraping
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Right monitor column (5 cols) -->
+                <div class="lg:col-span-5 space-y-8">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
+                        <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
+                            <h2 class="text-lg font-semibold text-zinc-200">Scrape Status</h2>
+                            <button id="ratings-stop-btn" onclick="stopRatingsScrape()" disabled class="px-3 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition disabled:bg-zinc-800 disabled:text-zinc-600">Stop</button>
+                        </div>
+
+                        <!-- Progress indicator -->
+                        <div id="ratings-progress-card" class="space-y-2">
+                            <div class="flex justify-between text-xs text-zinc-400 font-medium">
+                                <span id="ratings-progress-status">Ready to start</span>
+                                <span id="ratings-progress-percent">0%</span>
+                            </div>
+                            <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
+                                <div id="ratings-progress-bar-fill" class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300" style="width: 0%;"></div>
+                            </div>
+                            <div class="flex justify-between text-[11px] text-zinc-500">
+                                <span>Progress</span>
+                                <span id="ratings-progress-count">0 / 0</span>
+                            </div>
+                        </div>
+
+                        <!-- Download output -->
+                        <div id="ratings-download-card" class="hidden p-4 rounded-xl bg-emerald-950/20 border border-emerald-500/20 flex items-center justify-between">
+                            <div>
+                                <h3 class="font-bold text-emerald-400 text-sm">Output File Ready!</h3>
+                                <p class="text-zinc-400 text-xs mt-0.5">Incremental spreadsheet saved to Downloads.</p>
+                            </div>
+                            <a id="ratings-download-link" href="#" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white transition flex items-center gap-1.5 shadow-md">
+                                <i class="fa-solid fa-download"></i>Download
+                            </a>
+                        </div>
+
+                        <!-- Terminal console -->
+                        <div class="space-y-2">
+                            <label class="text-xs font-bold uppercase tracking-wider text-zinc-500">Console Logs</label>
+                            <div id="ratings-terminal" class="h-64 p-4 rounded-xl bg-zinc-950/80 border border-zinc-850 font-mono text-[11px] text-emerald-500/80 overflow-y-auto custom-scrollbar space-y-1.5">
+                                <div class="text-zinc-600">> Scraper initialized.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ──────────────────────────────────────────────────────── -->
+        <!-- TAB 2: GOD MODE (PAGE SCANNER) PANEL                     -->
+        <!-- ──────────────────────────────────────────────────────── -->
+        <section id="godmode-pane" class="tab-pane hidden space-y-8">
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                <!-- Left scan controls -->
+                <div class="lg:col-span-7 space-y-8">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
+                        <h2 class="text-lg font-semibold text-zinc-300 flex items-center">
+                            <i class="fa-solid fa-eye mr-2.5 text-indigo-400"></i>Page Scanner & Link Builder
+                        </h2>
+                        
+                        <div class="space-y-2">
+                            <label class="text-sm font-medium text-zinc-400 block font-semibold">Visit Page URL</label>
+                            <input type="text" id="godmode-url" class="w-full p-4 rounded-xl bg-zinc-950/40 border border-zinc-800 text-zinc-300 focus:outline-none focus:border-indigo-500" placeholder="https://example.com/hotel-page">
+                        </div>
+
+                        <button onclick="scanPage()" class="w-full py-4 rounded-xl font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition flex items-center justify-center gap-2 shadow-lg">
+                            <i class="fa-solid fa-search"></i>Scan Page Elements
+                        </button>
+                    </div>
+
+                    <!-- Link Builder Sub-card -->
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
+                        <h2 class="text-lg font-semibold text-zinc-300 flex items-center">
+                            <i class="fa-solid fa-link mr-2.5 text-cyan-400"></i>Frontend Link Generator
+                        </h2>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="text-xs font-semibold text-zinc-400 block mb-2">Hotel ID</label>
+                                <input type="text" id="lb-id" class="w-full p-3 rounded-lg bg-zinc-950/40 border border-zinc-800 text-zinc-300 text-sm" placeholder="e.g. 32775">
+                            </div>
+                            <div>
+                                <label class="text-xs font-semibold text-zinc-400 block mb-2">Hotel Name (for url)</label>
+                                <input type="text" id="lb-name" class="w-full p-3 rounded-lg bg-zinc-950/40 border border-zinc-800 text-zinc-300 text-sm" placeholder="e.g. FabHotel Grand Olive">
+                            </div>
+                        </div>
+                        <button onclick="generateFrontendLinks()" class="w-full py-2.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-cyan-400 border border-cyan-400/20 transition">
+                            Generate Standard Search URLs
+                        </button>
+                        <div id="lb-output" class="hidden p-4 rounded-lg bg-zinc-950/40 border border-zinc-850 space-y-2 text-xs">
+                            <!-- Links display dynamically -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Scan Results -->
+                <div class="lg:col-span-5 space-y-8">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-4">
+                        <h2 class="text-lg font-semibold text-zinc-200">Scan Summary</h2>
+                        <div id="godmode-results" class="h-96 p-4 rounded-xl bg-zinc-950/80 border border-zinc-850 font-mono text-[11px] text-cyan-500 overflow-y-auto custom-scrollbar">
+                            <div class="text-zinc-600">> Ready to scan any page structure...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ──────────────────────────────────────────────────────── -->
+        <!-- TAB 3: UNIVERSAL SCRAPER PANEL                           -->
+        <!-- ──────────────────────────────────────────────────────── -->
+        <section id="universal-pane" class="tab-pane hidden space-y-8">
+            <!-- Main Workspace Grid -->
+            <main class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                
+                <!-- LEFT COLUMN: Configurations & Selection (7 cols) -->
+                <section class="lg:col-span-7 space-y-8">
+                    
+                    <!-- 1. Source Selection Card -->
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl">
+                        <h2 class="text-lg font-semibold mb-4 text-zinc-300 flex items-center">
+                            <span class="h-6 w-6 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center mr-2.5 text-xs">1</span>
+                            Select Extranet Source
+                        </h2>
+                        <div class="grid grid-cols-2 sm:grid-cols-3 gap-4" id="source-container">
+                            <!-- Source Cards render dynamically -->
+                            <div class="animate-pulse bg-zinc-800/20 border border-zinc-700/30 rounded-xl p-4 h-20"></div>
+                        </div>
+                    </div>
+
+                    <!-- 2. Fields/Sub-tabs Selection Card -->
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl relative min-h-[300px]">
+                        <div class="flex items-center justify-between mb-4">
+                            <h2 class="text-lg font-semibold text-zinc-300 flex items-center">
+                                <span class="h-6 w-6 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center mr-2.5 text-xs">2</span>
+                                Choose Fields / Sub-Tabs
+                            </h2>
+                            <div class="flex items-center space-x-2 text-xs" id="field-select-actions" style="display: none;">
+                                <button onclick="selectAllFields(true)" class="text-blue-400 hover:text-blue-300 transition">Select All</button>
+                                <span class="text-zinc-600">|</span>
+                                <button onclick="selectAllFields(false)" class="text-zinc-400 hover:text-zinc-300 transition">Clear All</button>
+                            </div>
+                        </div>
+                        
+                        <div id="fields-welcome" class="absolute inset-0 flex flex-col items-center justify-center text-zinc-500 p-6">
+                            <i class="fa-solid fa-list-check text-4xl mb-3 text-zinc-600"></i>
+                            <p class="text-sm">Please select an extranet source above to display available sub-tabs</p>
+                        </div>
+
+                        <div id="fields-container" class="space-y-6 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar" style="display: none;">
+                            <!-- Groups & Fields render dynamically -->
+                        </div>
+                    </div>
+
+                    <!-- 3. Launch Controls -->
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl">
+                        <h2 class="text-lg font-semibold mb-4 text-zinc-300 flex items-center">
+                            <span class="h-6 w-6 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mr-2.5 text-xs">3</span>
+                            Engine Configuration
+                        </h2>
+                        
+                        <div class="grid grid-cols-2 gap-6 mb-6">
+                            <div class="flex items-center justify-between p-4 rounded-xl bg-zinc-950/30 border border-zinc-800">
+                                <div>
+                                    <label class="font-medium text-sm text-zinc-300 block">Headless Mode</label>
+                                    <span class="text-zinc-500 text-xs">Run browser in background</span>
+                                </div>
+                                <button id="toggle-headless" onclick="toggleOption('headless')" class="w-11 h-6 rounded-full bg-zinc-700 transition relative">
+                                    <span class="w-5 h-5 rounded-full bg-white absolute top-0.5 left-0.5 shadow transition-all transform" id="toggle-headless-dot"></span>
+                                </button>
+                            </div>
+                            
+                            <div class="flex items-center justify-between p-4 rounded-xl bg-zinc-950/30 border border-zinc-800">
+                                <div>
+                                    <label class="font-medium text-sm text-zinc-300 block">Fast Scrape Mode</label>
+                                    <span class="text-zinc-500 text-xs">Block images to save data</span>
+                                </div>
+                                <button id="toggle-fast" onclick="toggleOption('fast')" class="w-11 h-6 rounded-full bg-zinc-700 transition relative">
+                                    <span class="w-5 h-5 rounded-full bg-white absolute top-0.5 left-0.5 shadow transition-all transform" id="toggle-fast-dot"></span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <button id="start-btn" onclick="startScrape()" disabled class="w-full py-4 rounded-xl font-bold bg-zinc-700 text-zinc-500 cursor-not-allowed text-center transition shadow-lg transform hover:-translate-y-0.5 active:translate-y-0">
+                            Start Localhost Scrape Run
+                        </button>
+                    </div>
+
+                </section>
+
+                <!-- RIGHT COLUMN: Log Monitor & Status (5 cols) -->
+                <section class="lg:col-span-5 space-y-8">
+                    
+                    <!-- Active Session State Card -->
+                    <div id="active-session-card" class="glass-panel rounded-2xl p-6 shadow-xl border-blue-500/20" style="display: none;">
+                        <div class="flex items-center justify-between mb-4">
+                            <h2 class="text-lg font-semibold text-zinc-200">Active Scraping Run</h2>
+                            <span class="px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 text-xs font-semibold uppercase tracking-wider" id="active-session-id">-</span>
+                        </div>
+
+                        <!-- Warning Banner for Headed Login -->
+                        <div id="login-warning-banner" class="mb-4 p-4 rounded-xl bg-amber-950/30 border border-amber-500/20 flex flex-col gap-3" style="display: none;">
+                            <div class="flex items-start gap-3 text-amber-400 text-sm">
+                                <i class="fa-solid fa-triangle-exclamation mt-0.5"></i>
+                                <div>
+                                    <p class="font-semibold" id="login-warning-title">Login Action Required</p>
+                                    <p class="text-xs text-zinc-400 mt-1" id="login-warning-msg">Browser session has expired. Please log in in the visible browser window on your desktop and confirm.</p>
+                                </div>
+                            </div>
+                            <button onclick="confirmLogin()" class="w-full py-2 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold rounded-lg text-xs transition uppercase tracking-wider">
+                                Confirm Desktop Login
+                            </button>
+                        </div>
+
+                        <!-- Progress bar -->
+                        <div class="space-y-2 mb-4">
+                            <div class="flex justify-between text-xs text-zinc-400 font-medium">
+                                <span id="progress-status">Initializing Playwright context...</span>
+                                <span id="progress-percent">0%</span>
+                            </div>
+                            <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
+                                <div id="progress-bar-fill" class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300" style="width: 0%;"></div>
+                            </div>
+                            <div class="flex justify-between text-[11px] text-zinc-500">
+                                <span>Platform Navigation</span>
+                                <span id="progress-count">0 / 0</span>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="p-3 bg-zinc-950/20 border border-zinc-850 rounded-xl text-center">
+                                <span class="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Estimated Remaining</span>
+                                <span class="block text-zinc-200 text-lg font-bold mt-0.5" id="active-eta">-</span>
+                            </div>
+                            <div class="p-3 bg-zinc-950/20 border border-zinc-850 rounded-xl text-center">
+                                <span class="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Total Rows Exported</span>
+                                <span class="block text-emerald-400 text-lg font-bold mt-0.5 animate-pulse" id="active-rows-count">0</span>
+                            </div>
+                        </div>
+
+                        <button onclick="stopScrape()" class="w-full py-2.5 bg-rose-600/10 hover:bg-rose-600 border border-rose-500/20 hover:border-transparent text-rose-400 hover:text-white font-bold rounded-xl text-xs transition uppercase tracking-wider mt-4">
+                            Cancel Active Run
+                        </button>
+                    </div>
+
+                    <!-- Terminal Logs View -->
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-4">
+                        <div class="flex items-center justify-between border-b border-zinc-800 pb-2">
+                            <span class="text-sm font-semibold text-zinc-400 tracking-wide">Live Session Logger</span>
+                            <button onclick="clearTerminalLogs()" class="text-zinc-500 hover:text-zinc-300 text-xs transition">Clear</button>
+                        </div>
+                        
+                        <div id="terminal" class="h-64 p-4 rounded-xl bg-zinc-950/80 border border-zinc-850 font-mono text-[11px] text-indigo-400/90 overflow-y-auto custom-scrollbar space-y-1.5">
+                            <div class="text-zinc-600">> Live output logs will stream here.</div>
+                        </div>
+                    </div>
+
+                </section>
+                
+            </main>
+
+            <!-- Bottom History Row -->
+            <section class="glass-panel rounded-2xl p-6 shadow-xl space-y-4">
+                <h2 class="text-lg font-semibold text-zinc-200 flex items-center">
+                    <i class="fa-solid fa-history mr-2.5 text-blue-400"></i>Scrape Runs History
+                </h2>
+                
+                <div class="overflow-x-auto custom-scrollbar">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="border-b border-zinc-800 text-xs font-bold text-zinc-500 uppercase tracking-wider">
+                                <th class="py-3 px-4">Date Started</th>
+                                <th class="py-3 px-4">Source</th>
+                                <th class="py-3 px-4">Export Fields</th>
+                                <th class="py-3 px-4">Status</th>
+                                <th class="py-3 px-4 text-center">Hotels Done</th>
+                                <th class="py-3 px-4 text-center">Rows Saved</th>
+                                <th class="py-3 px-4 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-tbody" class="text-sm divide-y divide-zinc-900/40">
+                            <!-- History logs dynamically load -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </section>
+
+        <!-- ──────────────────────────────────────────────────────── -->
+        <!-- TAB 4: ASYNC SCRAPER PANEL                               -->
+        <!-- ──────────────────────────────────────────────────────── -->
+        <section id="async-pane" class="tab-pane hidden space-y-8">
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                <div class="lg:col-span-7 space-y-8">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
+                        <h2 class="text-lg font-semibold text-zinc-300 flex items-center">
+                            <i class="fa-solid fa-bolt-lightning mr-2.5 text-yellow-400"></i>High-Performance Async Scraper
+                        </h2>
+                        
+                        <div class="space-y-2">
+                            <label class="text-sm font-medium text-zinc-400 block font-semibold">Target URLs List (One per line)</label>
+                            <textarea id="async-urls" rows="8" class="w-full p-4 rounded-xl bg-zinc-950/40 border border-zinc-800 text-zinc-300 focus:outline-none focus:border-yellow-500 terminal-font text-xs" placeholder="Paste targets (e.g. Booking/Google reviews links)..."></textarea>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="text-sm font-medium text-zinc-400 block mb-2">Sources Filter</label>
+                                <select id="async-sources" class="w-full p-3 rounded-xl bg-zinc-950/40 border border-zinc-800 text-zinc-300 focus:outline-none focus:border-yellow-500">
+                                    <option value="All">All platforms</option>
+                                    <option value="Booking">Booking.com only</option>
+                                    <option value="Google">Google Maps only</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium text-zinc-400 block mb-2">Max Concurrency Limit</label>
+                                <input type="number" id="async-concurrency" value="10" min="1" max="50" class="w-full p-3 rounded-xl bg-zinc-950/40 border border-zinc-800 text-zinc-300 focus:outline-none">
+                            </div>
+                        </div>
+
+                        <div class="flex items-center space-x-3">
+                            <input type="checkbox" id="async-api-discovery" class="w-4 h-4 rounded bg-zinc-800 border-zinc-700">
+                            <label for="async-api-discovery" class="text-sm text-zinc-300">Attempt automatic API Endpoint Discovery</label>
+                        </div>
+
+                        <button id="async-start-btn" onclick="startAsyncScrape()" class="w-full py-4 rounded-xl font-bold bg-yellow-600 hover:bg-yellow-500 text-white transition shadow-lg">
+                            ⚡ Launch Async Engine Run
+                        </button>
+                    </div>
+                </div>
+
+                <div class="lg:col-span-5 space-y-8">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
+                        <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
+                            <h2 class="text-lg font-semibold text-zinc-200">Async Session Monitor</h2>
+                            <button id="async-stop-btn" onclick="stopAsyncScrape()" disabled class="px-3 py-1 rounded bg-rose-600 text-white text-xs font-bold transition">Stop</button>
+                        </div>
+
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-xs text-zinc-400">
+                                <span id="async-status-lbl">Ready</span>
+                                <span id="async-progress-pct">0%</span>
+                            </div>
+                            <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
+                                <div id="async-progress-fill" class="h-full bg-yellow-500 transition-all duration-300" style="width: 0%;"></div>
+                            </div>
+                        </div>
+
+                        <!-- Download output -->
+                        <div id="async-download-card" class="hidden p-4 rounded-xl bg-yellow-950/20 border border-yellow-500/20 flex items-center justify-between">
+                            <div>
+                                <h3 class="font-bold text-yellow-400 text-sm">Download Async Results</h3>
+                                <p class="text-zinc-400 text-xs mt-0.5">Incremental output CSV is ready.</p>
+                            </div>
+                            <a id="async-download-link" href="#" class="px-4 py-2 rounded-lg bg-yellow-600 hover:bg-yellow-500 text-xs font-bold text-white transition flex items-center gap-1.5 shadow-md">
+                                <i class="fa-solid fa-download"></i>Download
+                            </a>
+                        </div>
+
+                        <div class="space-y-2">
+                            <label class="text-xs font-bold text-zinc-500 uppercase">Live Output Log</label>
+                            <div id="async-terminal" class="h-64 p-4 rounded-xl bg-zinc-950/80 border border-zinc-850 font-mono text-[11px] text-yellow-500/90 overflow-y-auto custom-scrollbar space-y-1">
+                                <div class="text-zinc-600">> Async module ready.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ──────────────────────────────────────────────────────── -->
+        <!-- TAB 5: BULK OCM GENERATOR PANEL                         -->
+        <!-- ──────────────────────────────────────────────────────── -->
+        <section id="ocm-pane" class="tab-pane hidden space-y-8">
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                <!-- Left Configuration (7 cols) -->
+                <div class="lg:col-span-7 space-y-8">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
+                        <h2 class="text-lg font-semibold text-zinc-300 flex items-center">
+                            <i class="fa-solid fa-file-pdf mr-2.5 text-rose-400"></i>OCM Bulk Generation
+                        </h2>
+                        
+                        <div class="flex items-center justify-between p-4 rounded-xl bg-zinc-950/20 border border-zinc-850">
+                            <div>
+                                <span class="font-medium text-sm text-zinc-300 block">Select Input CSV File</span>
+                                <span class="text-zinc-500 text-xs">CSV containing fields (ownerName, hotelName, address, city, etc.)</span>
+                            </div>
+                            <input type="file" id="ocm-file" accept=".csv" class="hidden" onchange="loadOCMCSV(event)">
+                            <button onclick="document.getElementById('ocm-file').click()" class="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm font-bold transition flex items-center gap-1">
+                                <i class="fa-solid fa-file-excel text-rose-400"></i>Choose File
+                            </button>
+                        </div>
+                        <div id="ocm-file-status" class="text-xs text-zinc-400 italic hidden"></div>
+
+                        <div class="space-y-2">
+                            <label class="text-sm font-medium text-zinc-400 block font-semibold">Output Directory Path</label>
+                            <input type="text" id="ocm-output-dir" class="w-full p-3.5 rounded-xl bg-zinc-950/40 border border-zinc-850 text-zinc-300 text-sm" placeholder="Leave empty for local Downloads/Generated_OCM">
+                        </div>
+
+                        <button id="ocm-start-btn" onclick="startOCMGeneration()" class="w-full py-4 rounded-xl font-bold bg-rose-600 hover:bg-rose-500 text-white transition flex items-center justify-center gap-2 shadow-lg">
+                            <i class="fa-solid fa-gears"></i>Generate LOA PDFs in Bulk
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Right monitor & logs (5 cols) -->
+                <div class="lg:col-span-5 space-y-8">
+                    <div class="glass-panel rounded-2xl p-6 shadow-xl space-y-6">
+                        <div class="flex items-center justify-between border-b border-zinc-800 pb-3">
+                            <h2 class="text-lg font-semibold text-zinc-200">OCM Status</h2>
+                            <button id="ocm-stop-btn" onclick="stopOCMGeneration()" disabled class="px-3 py-1 rounded bg-rose-700 text-white text-xs font-bold transition">Stop</button>
+                        </div>
+
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-xs text-zinc-400">
+                                <span id="ocm-status-lbl">Ready</span>
+                                <span id="ocm-progress-pct">0%</span>
+                            </div>
+                            <div class="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
+                                <div id="ocm-progress-fill" class="h-full bg-rose-500 transition-all duration-300" style="width: 0%;"></div>
+                            </div>
+                        </div>
+
+                        <div class="space-y-2">
+                            <label class="text-xs font-bold text-zinc-500 uppercase">Generation Log</label>
+                            <div id="ocm-terminal" class="h-64 p-4 rounded-xl bg-zinc-950/80 border border-zinc-850 font-mono text-[11px] text-rose-400/90 overflow-y-auto custom-scrollbar space-y-1">
+                                <div class="text-zinc-600">> OCM generator ready.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <!-- JavaScript Execution Scripts -->
+    <script>
+        // Tab switching logic
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-pane').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.tab-btn').forEach(el => {
+                el.classList.remove('active');
+            });
+            
+            document.getElementById(tabId + '-pane').classList.remove('hidden');
+            document.getElementById('nav-' + tabId).classList.add('active');
+        }
+
+        // Global lists
+        let parsedRatingsItems = [];
+        let parsedOCMItems = [];
+
+        // Parse CSV uploads client-side
+        function parseCSVText(text) {
+            const lines = text.split('\n');
+            if (lines.length === 0) return [];
+            
+            const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+            const list = [];
+            
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                const values = line.split(',').map(v => v.trim().replace(/^["']|["']$/g, ''));
+                const obj = {};
+                headers.forEach((h, idx) => {
+                    obj[h] = values[idx] || '';
+                });
+                list.push(obj);
+            }
+            return list;
+        }
+
+        // ── RATINGS SCRAPER JS ───────────────────────────────
+        let ratingsSessionId = null;
+        let ratingsInterval = null;
+
+        function loadRatingsCSV(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                try {
+                    const text = evt.target.result;
+                    const items = parseCSVText(text);
+                    
+                    parsedRatingsItems = items.map(item => {
+                        return {
+                            name: item.name || item.hotel_name || item.hotelName || '',
+                            city: item.city || '',
+                            url: item.url || item.link || '',
+                            source: item.source || 'quick',
+                            hotel_id: item.hotel_id || item.id || ''
+                        };
+                    });
+                    
+                    document.getElementById('ratings-file-status').textContent = `✓ Loaded ${parsedRatingsItems.length} hotels from ${file.name}`;
+                    document.getElementById('ratings-file-status').classList.remove('hidden');
+                    logRatingsTerminal(`> Loaded CSV file: ${file.name} (${parsedRatingsItems.length} entries)`);
+                } catch (e) {
+                    alert(`Failed to parse CSV: ${e.message}`);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function logRatingsTerminal(msg) {
+            const term = document.getElementById('ratings-terminal');
+            const d = document.createElement('div');
+            d.textContent = msg;
+            if (msg.includes('ERROR')) d.className = 'text-rose-400 font-semibold';
+            else if (msg.includes('complete') || msg.includes('Done:')) d.className = 'text-emerald-400 font-bold';
+            term.appendChild(d);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        async function startRatingsScrape() {
+            let items = [];
+            const manualText = document.getElementById('ratings-manual-input').value.trim();
+            
+            if (manualText) {
+                const lines = manualText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                items = lines.map(line => {
+                    return { name: line, url: line.includes('http') ? line : '', source: document.getElementById('ratings-platform').value };
+                });
+            } else if (parsedRatingsItems.length > 0) {
+                items = parsedRatingsItems;
+            } else {
+                alert("Please paste urls/names or upload a CSV file first!");
+                return;
+            }
+
+            const payload = {
+                items: items,
+                workers: parseInt(document.getElementById('ratings-workers').value) || 10
+            };
+
+            logRatingsTerminal(`> Requesting ratings scraping session for ${items.length} items...`);
+            
+            try {
+                const res = await fetch('/api/ratings/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                
+                if (res.ok) {
+                    ratingsSessionId = data.session_id;
+                    document.getElementById('ratings-start-btn').disabled = true;
+                    document.getElementById('ratings-stop-btn').disabled = false;
+                    document.getElementById('ratings-download-card').classList.add('hidden');
+                    
+                    ratingsInterval = setInterval(pollRatingsStatus, 1000);
+                    logRatingsTerminal(`> Ratings scraping job started. Session: ${ratingsSessionId}`);
+                } else {
+                    logRatingsTerminal(`> ERROR starting ratings scrape: ${data.error}`);
+                }
+            } catch(e) {
+                logRatingsTerminal(`> ERROR connecting to server ratings api: ${e.message}`);
+            }
+        }
+
+        async function pollRatingsStatus() {
+            if (!ratingsSessionId) return;
+            try {
+                const res = await fetch(`/api/ratings/status/${ratingsSessionId}`);
+                const data = await res.json();
+                
+                if (res.ok) {
+                    const percent = Math.round((data.progress_val / data.progress_max) * 100) || 0;
+                    document.getElementById('ratings-progress-bar-fill').style.width = `${percent}%`;
+                    document.getElementById('ratings-progress-percent').textContent = `${percent}%`;
+                    document.getElementById('ratings-progress-status').textContent = data.status_text;
+                    document.getElementById('ratings-progress-count').textContent = `${data.progress_val} / ${data.progress_max}`;
+                    
+                    const term = document.getElementById('ratings-terminal');
+                    term.innerHTML = '';
+                    data.logs.forEach(line => {
+                        const d = document.createElement('div');
+                        d.textContent = line;
+                        if (line.includes('ERROR')) d.className = 'text-rose-400';
+                        else if (line.includes('complete') || line.includes('Done:')) d.className = 'text-emerald-400';
+                        term.appendChild(d);
+                    });
+                    term.scrollTop = term.scrollHeight;
+
+                    if (data.finished) {
+                        logRatingsTerminal(`> Session finished successfully.`);
+                        clearInterval(ratingsInterval);
+                        ratingsSessionId = null;
+                        
+                        document.getElementById('ratings-start-btn').disabled = false;
+                        document.getElementById('ratings-stop-btn').disabled = true;
+                        
+                        document.getElementById('ratings-download-card').classList.remove('hidden');
+                        document.getElementById('ratings-download-link').href = `/api/ratings/download/${data.session_id}`;
+                    }
+                }
+            } catch (err) {
+                console.error("Ratings poll error:", err);
+            }
+        }
+
+        async function stopRatingsScrape() {
+            if (!ratingsSessionId) return;
+            try {
+                await fetch(`/api/ratings/stop/${ratingsSessionId}`, { method: 'POST' });
+                logRatingsTerminal("> Cancellation request submitted.");
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // ── GOD MODE JS ─────────────────────────────────────
+        async function scanPage() {
+            const url = document.getElementById('godmode-url').value.trim();
+            if (!url) {
+                alert("Please enter a URL to scan!");
+                return;
+            }
+
+            const term = document.getElementById('godmode-results');
+            term.innerHTML = `<div>> Initializing Chrome CDP connection...</div><div>> Fetching and scanning ${url} (Please wait 5-15 seconds)...</div>`;
+
+            try {
+                const res = await fetch('/api/godmode/scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: url })
+                });
+                const data = await res.json();
+                
+                if (res.ok) {
+                    term.innerHTML = `<div class="text-emerald-400 font-bold">> SCAN COMPLETED FOR: ${data.title || 'Page'}</div>`;
+                    term.innerHTML += `<div class="mt-2 text-zinc-400">Total text length: ${data.all_text_length} chars</div>`;
+                    
+                    if (data.ratings && data.ratings.length > 0) {
+                        term.innerHTML += `<div class="mt-4 text-amber-400 font-bold">★ Detected Ratings:</div>`;
+                        data.ratings.forEach(r => {
+                            term.innerHTML += `<div class="ml-4 text-zinc-300">Rating: ${r.rating} (${r.count} reviews)</div>`;
+                        });
+                    }
+
+                    if (data.tables && data.tables.length > 0) {
+                        term.innerHTML += `<div class="mt-4 text-indigo-400 font-bold">⊞ Detected Data Tables (${data.tables.length}):</div>`;
+                        data.tables.forEach((t, i) => {
+                            term.innerHTML += `<div class="ml-4 text-zinc-300">Table #${i+1}: ${t.row_count} rows, headers: [${t.headers.join(', ')}]</div>`;
+                        });
+                    }
+
+                    if (data.lists && data.lists.length > 0) {
+                        term.innerHTML += `<div class="mt-4 text-indigo-400 font-bold">🗂 Detected Lists (${data.lists.length}):</div>`;
+                        data.lists.forEach((l, i) => {
+                            term.innerHTML += `<div class="ml-4 text-zinc-300">List #${i+1}: ${l.item_count} items. Sample: ${l.sample.join(' | ')}</div>`;
+                        });
+                    }
+                } else {
+                    term.innerHTML = `<div class="text-rose-400 font-semibold">> SCAN FAILED: ${data.error}</div>`;
+                }
+            } catch(e) {
+                term.innerHTML = `<div class="text-rose-400 font-semibold">> ERROR connecting to GodMode API: ${e.message}</div>`;
+            }
+        }
+
+        function generateFrontendLinks() {
+            const id = document.getElementById('lb-id').value.trim();
+            const name = document.getElementById('lb-name').value.trim();
+            
+            if (!id && !name) {
+                alert("Please fill in Hotel ID or Hotel Name!");
+                return;
+            }
+
+            const out = document.getElementById('lb-output');
+            out.classList.remove('hidden');
+            out.innerHTML = '<span class="text-xs font-bold text-zinc-400 uppercase tracking-wide block border-b border-zinc-800 pb-1 mb-2">Generated Front-End URLs:</span>';
+
+            if (id) {
+                out.innerHTML += `<div class="mb-2"><strong>MMT Link:</strong> <a href="https://www.makemytrip.com/hotels/hotel-details.html?hotelId=${id}" target="_blank" class="text-blue-400 hover:underline break-all">https://www.makemytrip.com/hotels/hotel-details.html?hotelId=${id}</a></div>`;
+                out.innerHTML += `<div class="mb-2"><strong>Goibibo Link:</strong> <a href="https://www.goibibo.com/hotels/hotel-details.html?hotelId=${id}" target="_blank" class="text-blue-400 hover:underline break-all">https://www.goibibo.com/hotels/hotel-details.html?hotelId=${id}</a></div>`;
+            }
+            if (name) {
+                out.innerHTML += `<div class="mb-2"><strong>Booking.com Search:</strong> <a href="https://www.booking.com/searchresults.html?ss=${encodeURIComponent(name)}" target="_blank" class="text-blue-400 hover:underline break-all">https://www.booking.com/searchresults.html?ss=${encodeURIComponent(name)}</a></div>`;
+                out.innerHTML += `<div class="mb-2"><strong>Agoda Search:</strong> <a href="https://www.agoda.com/pages/agoda/default/DestinationSearchResult.aspx?asq=${encodeURIComponent(name)}" target="_blank" class="text-blue-400 hover:underline break-all">https://www.agoda.com/pages/agoda/default/DestinationSearchResult.aspx?asq=${encodeURIComponent(name)}</a></div>`;
+            }
+        }
+
+
+        // ── ASYNC SCRAPER JS ─────────────────────────────────
+        let asyncSessionId = null;
+        let asyncInterval = null;
+
+        function logAsyncTerminal(msg) {
+            const term = document.getElementById('async-terminal');
+            const d = document.createElement('div');
+            d.textContent = msg;
+            if (msg.includes('ERROR')) d.className = 'text-rose-400';
+            else if (msg.includes('completed')) d.className = 'text-emerald-400 font-bold';
+            term.appendChild(d);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        async function startAsyncScrape() {
+            const urlsText = document.getElementById('async-urls').value.trim();
+            if (!urlsText) {
+                alert("Please paste target URLs first!");
+                return;
+            }
+
+            const urls = urlsText.split('\n').map(u => u.trim()).filter(u => u.length > 0);
+            const payload = {
+                urls: urls,
+                concurrency: parseInt(document.getElementById('async-concurrency').value) || 10,
+                sources: document.getElementById('async-sources').value,
+                api_discovery: document.getElementById('async-api-discovery').checked
+            };
+
+            logAsyncTerminal(`> Launching async scraper for ${urls.length} URLs...`);
+
+            try {
+                const res = await fetch('/api/async_scraper/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                
+                if (res.ok) {
+                    asyncSessionId = data.session_id;
+                    document.getElementById('async-start-btn').disabled = true;
+                    document.getElementById('async-stop-btn').disabled = false;
+                    document.getElementById('async-download-card').classList.add('hidden');
+                    
+                    asyncInterval = setInterval(pollAsyncStatus, 1000);
+                    logAsyncTerminal(`> Async scraper job started. Session ID: ${asyncSessionId}`);
+                } else {
+                    logAsyncTerminal(`> ERROR starting async scrape: ${data.error}`);
+                }
+            } catch(e) {
+                logAsyncTerminal(`> ERROR connecting to async scraper API: ${e.message}`);
+            }
+        }
+
+        async function pollAsyncStatus() {
+            if (!asyncSessionId) return;
+            try {
+                const res = await fetch(`/api/async_scraper/status/${asyncSessionId}`);
+                const data = await res.json();
+                
+                if (res.ok) {
+                    const percent = Math.round((data.progress_val / data.progress_max) * 100) || 0;
+                    document.getElementById('async-progress-fill').style.width = `${percent}%`;
+                    document.getElementById('async-progress-pct').textContent = `${percent}%`;
+                    document.getElementById('async-status-lbl').textContent = data.status_text;
+                    
+                    const term = document.getElementById('async-terminal');
+                    term.innerHTML = '';
+                    data.logs.forEach(line => {
+                        const d = document.createElement('div');
+                        d.textContent = line;
+                        if (line.includes('ERROR')) d.className = 'text-rose-400';
+                        else if (line.includes('completed')) d.className = 'text-emerald-400 font-bold';
+                        term.appendChild(d);
+                    });
+                    term.scrollTop = term.scrollHeight;
+
+                    if (data.finished) {
+                        logAsyncTerminal(`> Session finished successfully.`);
+                        clearInterval(asyncInterval);
+                        asyncSessionId = null;
+                        
+                        document.getElementById('async-start-btn').disabled = false;
+                        document.getElementById('async-stop-btn').disabled = true;
+                        
+                        document.getElementById('async-download-card').classList.remove('hidden');
+                        document.getElementById('async-download-link').href = `/api/async_scraper/download/${data.session_id}`;
+                    }
+                }
+            } catch (err) {
+                console.error("Async poll error:", err);
+            }
+        }
+
+        async function stopAsyncScrape() {
+            if (!asyncSessionId) return;
+            try {
+                await fetch(`/api/async_scraper/stop/${asyncSessionId}`, { method: 'POST' });
+                logAsyncTerminal("> Cancellation request sent.");
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+
+        // ── BULK OCM JS ─────────────────────────────────────
+        let ocmSessionId = null;
+        let ocmInterval = null;
+
+        function loadOCMCSV(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                try {
+                    const text = evt.target.result;
+                    parsedOCMItems = parseCSVText(text);
+                    
+                    document.getElementById('ocm-file-status').textContent = `✓ Loaded ${parsedOCMItems.length} rows from ${file.name}`;
+                    document.getElementById('ocm-file-status').classList.remove('hidden');
+                    logOCMTerminal(`> Loaded CSV file: ${file.name} (${parsedOCMItems.length} rows ready)`);
+                } catch (e) {
+                    alert(`Failed to parse CSV: ${e.message}`);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function logOCMTerminal(msg) {
+            const term = document.getElementById('ocm-terminal');
+            const d = document.createElement('div');
+            d.textContent = msg;
+            if (msg.includes('Error') || msg.includes('failed')) d.className = 'text-rose-400';
+            else if (msg.includes('Saved PDF') || msg.includes('Completed!')) d.className = 'text-emerald-400 font-bold';
+            term.appendChild(d);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        async function startOCMGeneration() {
+            if (parsedOCMItems.length === 0) {
+                alert("Please select and load an input CSV first!");
+                return;
+            }
+
+            const payload = {
+                items: parsedOCMItems,
+                output_dir: document.getElementById('ocm-output-dir').value.trim()
+            };
+
+            logOCMTerminal(`> Requesting bulk OCM generation run for ${parsedOCMItems.length} templates...`);
+
+            try {
+                const res = await fetch('/api/ocm/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                
+                if (res.ok) {
+                    ocmSessionId = data.session_id;
+                    document.getElementById('ocm-start-btn').disabled = true;
+                    document.getElementById('ocm-stop-btn').disabled = false;
+                    
+                    ocmInterval = setInterval(pollOCMStatus, 1000);
+                    logOCMTerminal(`> Generation started successfully. Session ID: ${ocmSessionId}`);
+                } else {
+                    logOCMTerminal(`> ERROR starting generation: ${data.error}`);
+                }
+            } catch(e) {
+                logOCMTerminal(`> ERROR connecting to OCM Generator API: ${e.message}`);
+            }
+        }
+
+        async function pollOCMStatus() {
+            if (!ocmSessionId) return;
+            try {
+                const res = await fetch(`/api/ocm/status/${ocmSessionId}`);
+                const data = await res.json();
+                
+                if (res.ok) {
+                    const percent = Math.round((data.progress_val / data.progress_max) * 100) || 0;
+                    document.getElementById('ocm-progress-fill').style.width = `${percent}%`;
+                    document.getElementById('ocm-progress-pct').textContent = `${percent}%`;
+                    document.getElementById('ocm-status-lbl').textContent = data.status_text;
+                    
+                    const term = document.getElementById('ocm-terminal');
+                    term.innerHTML = '';
+                    data.logs.forEach(line => {
+                        const d = document.createElement('div');
+                        d.textContent = line;
+                        if (line.includes('Error') || line.includes('failed')) d.className = 'text-rose-400';
+                        else if (line.includes('Saved PDF') || line.includes('Completed!')) d.className = 'text-emerald-400';
+                        term.appendChild(d);
+                    });
+                    term.scrollTop = term.scrollHeight;
+
+                    if (data.finished) {
+                        logOCMTerminal(`> Bulk generation finished.`);
+                        clearInterval(ocmInterval);
+                        ocmSessionId = null;
+                        
+                        document.getElementById('ocm-start-btn').disabled = false;
+                        document.getElementById('ocm-stop-btn').disabled = true;
+                    }
+                }
+            } catch (err) {
+                console.error("OCM poll error:", err);
+            }
+        }
+
+        async function stopOCMGeneration() {
+            if (!ocmSessionId) return;
+            try {
+                await fetch(`/api/ocm/stop/${ocmSessionId}`, { method: 'POST' });
+                logOCMTerminal("> Cancellation request sent.");
+            } catch (e) {
+                console.error(e);
+            }
+        }
+    </script>
+
+    <!-- ──────────────────────────────────────────────────────── -->
+    <!-- EXISTING UNIVERSAL SCRAPER JAVASCRIPT BLOCK               -->
+    <!-- ──────────────────────────────────────────────────────── -->
+    <script>
+        let sources = {};
+        let selectedSource = null;
+        let selectedFields = new Set();
+        let config = { headless: false, fast: false };
+        
+        let activeSessionId = null;
+        let activeInterval = null;
+
+        async function fetchSources() {
+            try {
+                const res = await fetch('/api/sources');
+                sources = await res.json();
+                renderSources(sources);
+            } catch (err) {
+                logTerminal(`> ERROR fetching sources configuration: ${err.message}`);
+            }
+        }
+
+        function renderSources(sourcesData) {
+            const container = document.getElementById('source-container');
+            container.innerHTML = '';
+            
+            Object.keys(sourcesData).forEach(key => {
+                const s = sourcesData[key];
+                const card = document.createElement('div');
+                card.id = `src-${key}`;
+                card.className = 'glass-card rounded-xl p-4 cursor-pointer flex flex-col justify-center select-none';
+                card.onclick = () => selectSource(key);
+                card.innerHTML = `
+                    <span class="font-bold text-sm text-zinc-200 block">${s.name}</span>
+                    <span class="text-[10px] text-zinc-500 mt-1 uppercase font-semibold tracking-wider">${s.available_fields.length} tabs available</span>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function selectSource(key) {
+            if (activeSessionId) return;
+            
+            selectedSource = key;
+            selectedFields.clear();
+            
+            document.querySelectorAll('#source-container > div').forEach(el => el.classList.remove('active'));
+            document.getElementById(`src-${key}`).classList.add('active');
+            
+            renderFields(sources[key].available_fields);
+            
+            document.getElementById('field-select-actions').style.display = 'flex';
+            document.getElementById('fields-welcome').style.display = 'none';
+            document.getElementById('fields-container').style.display = 'block';
+            
+            updateStartButtonState();
+            logTerminal(`> Selected platform source: ${sources[key].name}`);
+        }
+
+        function renderFields(groups) {
+            const container = document.getElementById('fields-container');
+            container.innerHTML = '';
+            
+            groups.forEach((g, gIdx) => {
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'space-y-3';
+                
+                groupDiv.innerHTML = `
+                    <div class="flex items-center justify-between border-b border-zinc-800 pb-1.5">
+                        <span class="text-xs font-semibold uppercase tracking-wider text-zinc-400">${g.group}</span>
+                        <button onclick="toggleGroupFields('${g.group}', ${gIdx}, true)" class="text-[10px] text-indigo-400 hover:text-indigo-300">All</button>
+                    </div>
+                `;
+                
+                const grid = document.createElement('div');
+                grid.className = 'grid grid-cols-1 sm:grid-cols-2 gap-3.5';
+                
+                g.fields.forEach(f => {
+                    const item = document.createElement('div');
+                    item.className = 'flex items-start space-x-3 p-3 rounded-lg bg-zinc-950/20 border border-zinc-850 hover:bg-zinc-900/10 cursor-pointer select-none';
+                    item.onclick = (e) => {
+                        if (e.target.tagName !== 'INPUT') {
+                            const cb = document.getElementById(`cb-${f.key}`);
+                            cb.checked = !cb.checked;
+                            toggleField(f.key, cb.checked);
+                        }
+                    };
+                    item.innerHTML = `
+                        <input type="checkbox" id="cb-${f.key}" data-group="${g.group}" value="${f.key}" class="w-4 h-4 mt-0.5 rounded text-blue-600 bg-zinc-800 border-zinc-700 focus:ring-blue-500 focus:ring-offset-zinc-900" onclick="toggleField('${f.key}', this.checked)">
+                        <div>
+                            <span class="text-sm font-medium text-zinc-300 block">${f.label}</span>
+                            <span class="text-[10px] text-zinc-500 terminal-font">${f.key}</span>
+                        </div>
+                    `;
+                    grid.appendChild(item);
+                });
+                
+                groupDiv.appendChild(grid);
+                container.appendChild(groupDiv);
+            });
+        }
+
+        function toggleField(key, checked) {
+            if (checked) {
+                selectedFields.add(key);
+            } else {
+                selectedFields.delete(key);
+            }
+            updateStartButtonState();
+        }
+
+        function toggleGroupFields(groupName, gIdx, selectAll) {
+            const inputs = document.querySelectorAll(`input[data-group="${groupName}"]`);
+            inputs.forEach(input => {
+                input.checked = selectAll;
+                toggleField(input.value, selectAll);
+            });
+        }
+
+        function selectAllFields(select) {
+            const inputs = document.querySelectorAll('#fields-container input[type="checkbox"]');
+            inputs.forEach(input => {
+                input.checked = select;
+                toggleField(input.value, select);
+            });
+        }
+
+        function updateStartButtonState() {
+            const startBtn = document.getElementById('start-btn');
+            if (selectedSource && selectedFields.size > 0) {
+                startBtn.disabled = false;
+                startBtn.classList.replace('bg-zinc-700', 'bg-blue-600');
+                startBtn.classList.replace('text-zinc-500', 'text-white');
+                startBtn.classList.remove('cursor-not-allowed');
+                startBtn.classList.add('hover:from-blue-500', 'hover:to-blue-400', 'cursor-pointer');
+            } else {
+                startBtn.disabled = true;
+                startBtn.classList.replace('bg-blue-600', 'bg-zinc-700');
+                startBtn.classList.replace('text-white', 'text-zinc-500');
+                if (startBtn.classList.contains('cursor-pointer')) {
+                    startBtn.classList.remove('hover:from-blue-500', 'hover:to-blue-400', 'cursor-pointer');
+                    startBtn.classList.add('cursor-not-allowed');
+                }
+            }
+        }
+
+        function toggleOption(option) {
+            config[option] = !config[option];
+            const dot = document.getElementById(`toggle-${option}-dot`);
+            const btn = document.getElementById(`toggle-${option}`);
+            
+            if (config[option]) {
+                dot.style.transform = 'translateX(20px)';
+                btn.classList.replace('bg-zinc-700', 'bg-blue-600');
+            } else {
+                dot.style.transform = 'none';
+                btn.classList.replace('bg-blue-600', 'bg-zinc-700');
+            }
+        }
+
+        async function startScrape() {
+            if (!selectedSource || selectedFields.size === 0) return;
+            
+            const payload = {
+                source: selectedSource,
+                fields: Array.from(selectedFields),
+                headless: config.headless,
+                fast_mode: config.fast
+            };
+
+            logTerminal(`> Requesting scrape job start for ${sources[selectedSource].name} with ${selectedFields.size} fields...`);
+            
+            try {
+                const res = await fetch('/api/scrape/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                
+                if (res.ok) {
+                    activeSessionId = data.session_id;
+                    logTerminal(`> Scrape started successfully. Session ID: ${activeSessionId}`);
+                    
+                    document.getElementById('active-session-card').style.display = 'block';
+                    document.getElementById('active-session-id').textContent = activeSessionId.substring(12);
+                    
+                    document.getElementById('start-btn').disabled = true;
+                    activeInterval = setInterval(pollScrapeStatus, 1000);
+                } else {
+                    logTerminal(`> FAILED to start scrape: ${data.error}`);
+                    alert(data.error);
+                }
+            } catch (err) {
+                logTerminal(`> ERROR triggering scrape API: ${err.message}`);
+            }
+        }
+
+        async function pollScrapeStatus() {
+            if (!activeSessionId) return;
+            
+            try {
+                const res = await fetch(`/api/scrape/status/${activeSessionId}`);
+                const data = await res.json();
+                
+                if (res.ok) {
+                    const percent = Math.round((data.progress_val / data.progress_max) * 100) || 0;
+                    document.getElementById('progress-bar-fill').style.width = `${percent}%`;
+                    document.getElementById('progress-percent').textContent = `${percent}%`;
+                    document.getElementById('progress-status').textContent = data.status_text;
+                    document.getElementById('progress-count').textContent = `${data.progress_val} / ${data.progress_max}`;
+                    document.getElementById('active-rows-count').textContent = data.total_rows;
+
+                    updateTerminalLogs(data.logs);
+
+                    const banner = document.getElementById('login-warning-banner');
+                    if (data.login_required) {
+                        banner.style.display = 'flex';
+                        document.getElementById('login-warning-msg').textContent = data.login_msg;
+                    } else {
+                        banner.style.display = 'none';
+                    }
+
+                    if (data.finished) {
+                        logTerminal(`> Scrape job finished. Final status: ${data.status_text}`);
+                        clearInterval(activeInterval);
+                        activeSessionId = null;
+                        activeInterval = null;
+                        
+                        document.getElementById('active-session-card').style.display = 'none';
+                        updateStartButtonState();
+                        fetchHistory();
+                    }
+                }
+            } catch (err) {
+                logTerminal(`> WARNING: Failed to retrieve status updates: ${err.message}`);
+            }
+        }
+
+        async function confirmLogin() {
+            if (!activeSessionId) return;
+            
+            logTerminal(`> Confirming desktop browser login to resume thread...`);
+            try {
+                const res = await fetch(`/api/scrape/confirm_login/${activeSessionId}`, { method: 'POST' });
+                const data = await res.json();
+                logTerminal(`> Server response: ${data.message}`);
+                document.getElementById('login-warning-banner').style.display = 'none';
+            } catch (err) {
+                logTerminal(`> ERROR confirming login: ${err.message}`);
+            }
+        }
+
+        async function stopScrape() {
+            if (!activeSessionId) return;
+            
+            logTerminal(`> Requesting scan job cancellation...`);
+            try {
+                const res = await fetch(`/api/scrape/stop/${activeSessionId}`, { method: 'POST' });
+                const data = await res.json();
+                logTerminal(`> Server cancellation response: ${data.message}`);
+            } catch (err) {
+                logTerminal(`> ERROR cancelling run: ${err.message}`);
+            }
+        }
+
+        async function fetchHistory() {
+            try {
+                const res = await fetch('/api/history');
+                const data = await res.json();
+                renderHistory(data);
+            } catch (err) {
+                logTerminal(`> ERROR loading scrape history: ${err.message}`);
+            }
+        }
+
+        function renderHistory(sessions) {
+            const tbody = document.getElementById('history-tbody');
+            if (sessions.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="7" class="py-8 text-center text-zinc-600">
+                            <i class="fa-solid fa-box-open text-2xl mb-2 block"></i>No scrape runs found in history
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+            
+            tbody.innerHTML = '';
+            sessions.forEach(s => {
+                const tr = document.createElement('tr');
+                tr.className = 'border-b border-zinc-900/60 hover:bg-zinc-800/10 transition duration-150';
+                
+                let statusBadge = '';
+                if (s.status === 'Completed') {
+                    statusBadge = '<span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/10 text-emerald-400">Completed</span>';
+                } else if (s.status === 'Running') {
+                    statusBadge = '<span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-blue-500/10 text-blue-400 animate-pulse">Running</span>';
+                } else if (s.status.includes('Error') || s.status === 'Failed') {
+                    statusBadge = `<span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-rose-500/10 text-rose-400" title="${s.status}">Failed</span>`;
+                } else {
+                    statusBadge = `<span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-zinc-800 text-zinc-400">${s.status}</span>`;
+                }
+                
+                let fieldsText = '';
+                try {
+                    const fields = JSON.parse(s.fields);
+                    fieldsText = fields.map(f => f.label || f.key).join(', ');
+                    if (fieldsText.length > 50) {
+                        fieldsText = fieldsText.substring(0, 47) + '...';
+                    }
+                } catch(e) {
+                    fieldsText = s.fields;
+                }
+
+                tr.innerHTML = `
+                    <td class="py-3.5 px-4 font-medium text-zinc-300 whitespace-nowrap">${s.timestamp}</td>
+                    <td class="py-3.5 px-4 font-semibold text-zinc-200">${s.platform}</td>
+                    <td class="py-3.5 px-4 text-xs max-w-xs truncate" title="${fieldsText}">${fieldsText}</td>
+                    <td class="py-3.5 px-4">${statusBadge}</td>
+                    <td class="py-3.5 px-4 text-center font-medium">${s.processed_properties} / ${s.total_properties}</td>
+                    <td class="py-3.5 px-4 text-center font-bold text-emerald-400">${s.total_rows}</td>
+                    <td class="py-3.5 px-4 text-right">
+                        <a href="/api/download/${s.id}" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-blue-600 text-zinc-300 hover:text-white text-xs font-semibold transition shadow-md">
+                            <i class="fa-solid fa-file-excel"></i>Download
+                        </a>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function logTerminal(msg) {
+            const term = document.getElementById('terminal');
+            const item = document.createElement('div');
+            item.textContent = msg;
+            
+            if (msg.includes('ERROR')) {
+                item.className = 'text-rose-400 font-semibold';
+            } else if (msg.includes('WARNING')) {
+                item.className = 'text-amber-400 font-semibold';
+            } else if (msg.includes('successfully') || msg.includes('Done!')) {
+                item.className = 'text-emerald-400 font-bold';
+            } else if (msg.startsWith('>')) {
+                item.className = 'text-zinc-500';
+            }
+            
+            term.appendChild(item);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        function updateTerminalLogs(logsList) {
+            const term = document.getElementById('terminal');
+            const currentCount = term.children.length;
+            const newCount = logsList.length;
+            
+            if (newCount > currentCount - 1) {
+                term.innerHTML = '';
+                logsList.forEach(logLine => {
+                    const item = document.createElement('div');
+                    item.textContent = logLine;
+                    
+                    if (logLine.includes('Error:') || logLine.includes('Failed')) {
+                        item.className = 'text-rose-400 font-semibold';
+                    } else if (logLine.includes('Warning:') || logLine.includes('action required')) {
+                        item.className = 'text-amber-400 font-semibold';
+                    } else if (logLine.includes('finished successfully') || logLine.includes('Done!')) {
+                        item.className = 'text-emerald-400 font-bold';
+                    } else if (logLine.includes('Navigated to sub-tab:')) {
+                        item.className = 'text-cyan-400 font-medium';
+                    }
+                    
+                    term.appendChild(item);
+                });
+                term.scrollTop = term.scrollHeight;
+            }
+        }
+
+        function clearTerminalLogs() {
+            document.getElementById('terminal').innerHTML = '<div class="text-zinc-600">> Console cleared.</div>';
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            fetchSources();
+            fetchHistory();
+        });
+    </script>
+</body>
+</html>

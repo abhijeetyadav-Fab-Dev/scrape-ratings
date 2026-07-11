@@ -33,6 +33,7 @@ nul
 !RUN_WEB_APP.bat
 *.ps1
 *.html
+!web_app/templates/index.html
 *.png
 *.txt
 *.log
