@@ -8,24 +8,33 @@ echo    ScrapeRatings - Launching Web Dashboard
 echo  ==========================================
 echo.
 
-:: ── Step 1: Detect Python ──────────────────────────────────────────────
-where python >nul 2>nul
-if %errorlevel% neq 0 (
-    echo  [!] Python not found. Please run INSTALL_AND_RUN.bat first to set up the environment.
-    pause
-    exit /b 1
+:: ── Step 1: Resolve Python path from .python_path if exists ──────────────
+set "PYTHON_EXE="
+if exist "%~dp0.python_path" (
+    for /f "tokens=2 delims==" %%a in ('findstr "PYTHON_EXE" "%~dp0.python_path"') do set "PYTHON_EXE=%%a"
 )
 
-:: Find pythonw.exe or python.exe
-for /f "tokens=*" %%i in ('where python') do (
-    set "PYTHON_EXE=%%i"
-    goto :found_python
+if not defined PYTHON_EXE (
+    where python >nul 2>nul
+    if !errorlevel! eq 0 (
+        set "PYTHON_EXE=python"
+    ) else (
+        echo [!] Environment not set up. Please run START.bat or INSTALL_AND_RUN.bat first.
+        pause
+        exit /b 1
+    )
 )
-:found_python
 
-set "PYTHON_DIR=!PYTHON_EXE:~0,-10!"
-set "PYTHONW_EXE=!PYTHON_DIR!pythonw.exe"
-if not exist "!PYTHONW_EXE!" set "PYTHONW_EXE=!PYTHON_EXE!"
+if not exist "!PYTHON_EXE!" (
+    where python >nul 2>nul
+    if !errorlevel! eq 0 (
+        set "PYTHON_EXE=python"
+    ) else (
+        echo [!] Environment path invalid. Please run START.bat or INSTALL_AND_RUN.bat first.
+        pause
+        exit /b 1
+    )
+)
 
 :: ── Step 2: Open Browser to local dashboard ───────────────────────────
 echo  [*] Opening web dashboard in your browser...

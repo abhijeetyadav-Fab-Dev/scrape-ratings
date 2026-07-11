@@ -10,63 +10,86 @@ echo    RatingsScraper - First Time Setup
 echo  ==========================================
 echo.
 
-:: ── Step 1: Check for Python ───────────────────────────────────────────
-echo  [1/4] Checking for Python...
-where python >nul 2>nul
-if %errorlevel% neq 0 (
-    echo.
-    echo  [!] Python not found. Downloading Python 3.11...
-    echo.
-    powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '$env:TEMP\python_installer.exe'"
-    if !errorlevel! neq 0 (
-        echo  [ERROR] Could not download Python. Please install from https://python.org
-        pause
-        exit /b 1
-    )
-    echo  [*] Installing Python 3.11...
-    "%TEMP%\python_installer.exe" /quiet InstallAllUsers=0 PrependPath=1 Include_pip=1
-    if !errorlevel! neq 0 (
-        echo  [ERROR] Python install failed. Install manually from https://python.org
-        pause
-        exit /b 1
-    )
-    :: Refresh PATH
-    for /f "skip=2 tokens=3*" %%a in ('reg query "HKCU\Environment" /v PATH 2^>nul') do set "UPATH=%%a %%b"
-    set "PATH=%PATH%;%UPATH%"
+:: ── Step 1: Check for Python or Setup Portable Python ───────────────────
+echo  [1/4] Checking for Python environment...
+
+set "PYTHON_EXE="
+set "PYTHONW_EXE="
+
+:: 1. Check if we already have a portable python embed environment
+if exist "%~dp0python_embed\python.exe" (
+    set "PYTHON_EXE=%~dp0python_embed\python.exe"
+    set "PYTHONW_EXE=%~dp0python_embed\pythonw.exe"
+    echo  [*] Found local portable Python environment.
+    goto :python_resolved
 )
 
-:: ── Resolve exact python.exe and pythonw.exe paths ────────────────────
-for /f "tokens=*" %%i in ('where python') do (
-    set "PYTHON_EXE=%%i"
-    goto :found_python
-)
-:found_python
-:: Prefer Python311 if multiple are found
-echo %PYTHON_EXE% | findstr /i "Python311" >nul 2>nul
-if %errorlevel% neq 0 (
-    :: Try to find Python311 explicitly
+:: 2. Check if global python exists
+where python >nul 2>nul
+if %errorlevel% eq 0 (
+    for /f "tokens=*" %%i in ('where python') do (
+        set "GLOBAL_PY=%%i"
+        goto :check_global
+    )
+    :check_global
+    :: Prefer Python311/Python312 if multiple are found
     if exist "C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python311\python.exe" (
         set "PYTHON_EXE=C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python311\python.exe"
+    ) else if exist "C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe" (
+        set "PYTHON_EXE=C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe"
+    ) else (
+        set "PYTHON_EXE=!GLOBAL_PY!"
     )
+    
+    :: Derive pythonw path
+    set "PYTHON_DIR=!PYTHON_EXE:~0,-10!"
+    set "PYTHONW_EXE=!PYTHON_DIR!pythonw.exe"
+    if not exist "!PYTHONW_EXE!" set "PYTHONW_EXE=!PYTHON_EXE!"
+    
+    echo  [OK] Found global Python installation: !PYTHON_EXE!
+    goto :python_resolved
 )
 
-:: Derive pythonw path from python path
-set "PYTHON_DIR=%PYTHON_EXE:~0,-10%"
-set "PYTHONW_EXE=%PYTHON_DIR%pythonw.exe"
+:: 3. If Python is not found, download and setup Portable Python 3.11
+echo.
+echo  [!] No Python installation detected on your system.
+echo  [*] Downloading Portable Python 3.11.9 (embeddable)...
+echo      (This is lightweight ~10MB and runs self-contained - no admin required)
+echo.
 
-:: Fallback: if pythonw doesn't exist, just use python
-if not exist "!PYTHONW_EXE!" (
-    set "PYTHONW_EXE=!PYTHON_EXE!"
+if not exist "%~dp0python_embed" mkdir "%~dp0python_embed"
+
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile '%~dp0python_embed.zip'"
+if !errorlevel! neq 0 (
+    echo  [ERROR] Could not download Python embed package. Please check your internet connection.
+    pause
+    exit /b 1
 )
 
-:: Save the paths for START.bat to reuse
-echo PYTHON_EXE=!PYTHON_EXE! > "%~dp0.python_path"
-echo PYTHONW_EXE=!PYTHONW_EXE! >> "%~dp0.python_path"
+echo  [*] Extracting Portable Python environment...
+powershell -Command "Expand-Archive -Path '%~dp0python_embed.zip' -DestinationPath '%~dp0python_embed' -Force"
+del "%~dp0python_embed.zip" >nul 2>nul
+
+echo  [*] Installing pip package manager...
+powershell -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '%~dp0python_embed\get-pip.py'"
+"%~dp0python_embed\python.exe" "%~dp0python_embed\get-pip.py" --no-warn-script-location
+del "%~dp0python_embed\get-pip.py" >nul 2>nul
+
+echo  [*] Configuring path references...
+powershell -Command "Get-ChildItem '%~dp0python_embed' -Filter '*._pth' | ForEach-Object { (Get-Content $_.FullName) -replace '#import site', 'import site' | Set-Content $_.FullName }"
+
+set "PYTHON_EXE=%~dp0python_embed\python.exe"
+set "PYTHONW_EXE=%~dp0python_embed\pythonw.exe"
+echo  [OK] Portable Python environment configured!
+
+:python_resolved
+:: Save resolved paths
+echo PYTHON_EXE=!PYTHON_EXE!> "%~dp0.python_path"
+echo PYTHONW_EXE=!PYTHONW_EXE!>> "%~dp0.python_path"
 
 !PYTHON_EXE! --version > "%TEMP%\_pyver.txt" 2>nul
 set /p PYVER=<"%TEMP%\_pyver.txt"
-echo  [OK] Found !PYVER!
-echo  [OK] Using: !PYTHON_EXE!
+echo  [OK] Version: !PYVER!
 
 :: ── Step 2: Upgrade pip ────────────────────────────────────────────────
 echo.
@@ -76,14 +99,14 @@ echo  [2/4] Upgrading pip...
 :: ── Step 3: Install packages ───────────────────────────────────────────
 echo.
 echo  [3/4] Installing required packages...
-echo        (First run only - please wait ~1-2 min)
+echo        (This runs once - please wait ~1-2 min)
 echo.
 "!PYTHON_EXE!" -m pip install -r "%~dp0requirements.txt" --quiet --no-warn-script-location
 if !errorlevel! neq 0 (
-    echo  [!] Retry without version pins...
+    echo  [!] Retry installing without version pins...
     "!PYTHON_EXE!" -m pip install PyQt6 playwright httpx pandas beautifulsoup4 lxml aiofiles openpyxl --quiet --no-warn-script-location
 )
-echo  [OK] Packages installed!
+echo  [OK] Python dependencies installed!
 
 :: ── Step 4: Install Playwright Chromium ───────────────────────────────
 echo.

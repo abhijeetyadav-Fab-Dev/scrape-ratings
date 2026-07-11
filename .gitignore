@@ -31,6 +31,8 @@ nul
 !INSTALL_AND_RUN.bat
 !START.bat
 !RUN_WEB_APP.bat
+!RatingsScraper.bat
+!ScrapeRatings.bat
 *.ps1
 *.html
 !web_app/templates/index.html
