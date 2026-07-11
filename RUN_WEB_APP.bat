@@ -42,6 +42,8 @@ start "" "http://127.0.0.1:5000"
 
 :: ── Step 3: Run Flask server ──────────────────────────────────────────
 echo  [*] Starting Flask server on http://127.0.0.1:5000...
+echo  [*] Verifying dependencies...
+"!PYTHON_EXE!" -m pip install -r "%~dp0requirements.txt" --quiet --no-warn-script-location
 echo  [*] Press Ctrl+C in this window to stop the server.
 echo.
 "!PYTHON_EXE!" "%~dp0web_app\app.py"

@@ -28,5 +28,7 @@ call "%~dp0INSTALL_AND_RUN.bat"
 exit /b
 
 :launch
+echo  [*] Verifying dependencies...
+"!PYTHONW_EXE:~0,-11!python.exe" -m pip install -r "%~dp0requirements.txt" --quiet --no-warn-script-location
 start "" "!PYTHONW_EXE!" "%~dp0app.py"
 exit /b 0
