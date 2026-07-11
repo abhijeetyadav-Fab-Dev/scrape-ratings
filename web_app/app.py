@@ -1163,5 +1163,26 @@ def download_file(session_id):
             
     return jsonify({"error": "Excel file not found"}), 404
 
+@app.route("/api/ratings/login_mmt", methods=["POST"])
+def ratings_login_mmt():
+    from ratings_platforms import mmt_login
+    def run_login():
+        try:
+            mmt_login()
+        except Exception as e:
+            print(f"MMT login failed: {e}")
+    threading.Thread(target=run_login, daemon=True).start()
+    return jsonify({"message": "MMT login window opened on desktop."})
+
+@app.route("/api/ratings/session_status")
+def ratings_session_status():
+    from ratings_platforms import mmt_has_session
+    try:
+        status = mmt_has_session()
+    except Exception:
+        status = False
+    return jsonify({"mmt_active": status})
+
 if __name__ == "__main__":
     app.run(debug=True, host="127.0.0.1", port=5000)
+
