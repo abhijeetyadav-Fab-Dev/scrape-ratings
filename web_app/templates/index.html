@@ -398,19 +398,19 @@
                             
                             <div class="flex flex-wrap items-center justify-between gap-3 mt-3">
                                 <div class="flex gap-2">
-                                    <button class="btn-blue bg-[#1e293b] border border-zinc-700 px-3 py-2 rounded text-xs font-bold">Browse CSV</button>
-                                    <button class="btn-blue bg-[#1e293b] border border-zinc-700 px-3 py-2 rounded text-xs font-bold">Download Sample</button>
+                                    <input type="file" id="gmb-csv-file" accept=".csv" class="hidden" onchange="handleGMBCSV(event)">
+                                    <button onclick="document.getElementById('gmb-csv-file').click()" class="btn-blue bg-[#1e293b] hover:bg-zinc-800 border border-zinc-700 px-3 py-2 rounded text-xs font-bold">Browse CSV</button>
+                                    <button onclick="downloadGMLinkSample()" class="btn-blue bg-[#1e293b] hover:bg-zinc-800 border border-zinc-700 px-3 py-2 rounded text-xs font-bold">Download Sample</button>
                                 </div>
                                 <div class="flex gap-1.5">
-                                    <button onclick="alert('Bulk generate started')" class="btn-rose px-4 py-2 rounded text-xs font-bold">Start</button>
-                                    <button class="btn-grey bg-amber-600 px-4 py-2 rounded text-xs font-bold">Pause</button>
-                                    <button class="btn-grey px-4 py-2 rounded text-xs font-bold" disabled>Stop</button>
+                                    <button id="gmb-start-btn" onclick="runGMBulkLinkBuilder()" class="btn-rose px-4 py-2 rounded text-xs font-bold">Start</button>
+                                    <button id="gmb-stop-btn" onclick="stopGMBulkLinkBuilder()" class="btn-grey px-4 py-2 rounded text-xs font-bold" disabled>Stop</button>
                                 </div>
                             </div>
 
                             <div class="grid grid-cols-2 gap-3 mt-3">
-                                <button class="btn-green py-2 rounded text-xs font-bold" disabled>Download CSV</button>
-                                <button onclick="document.getElementById('gmb-bulk-text').value=''" class="btn-grey bg-[#374151] py-2 rounded text-xs font-bold">Clear</button>
+                                <button id="gmb-download-btn" onclick="downloadGMBulkCSV()" class="btn-green py-2 rounded text-xs font-bold" disabled>Download CSV</button>
+                                <button onclick="clearGMBBulk()" class="btn-grey bg-[#374151] hover:bg-[#4b5563] py-2 rounded text-xs font-bold">Clear</button>
                             </div>
                         </div>
 
@@ -442,22 +442,22 @@
                                     <label class="text-xs text-zinc-400 font-semibold">Lat, Long:</label>
                                     <div class="col-span-2 flex gap-2">
                                         <input type="text" id="gmf-latlong" class="flex-1 p-2 rounded bg-[#0e121b] border border-[#232d3f] text-zinc-200 text-xs focus:outline-none" placeholder="e.g. 18.9217, 72.8332">
-                                        <button onclick="alert('Looking up coordinates...')" class="btn-blue px-3 py-1.5 rounded text-xs font-bold">Lookup Hotel</button>
+                                        <button onclick="lookupCoordinates()" class="btn-blue px-3 py-1.5 rounded text-xs font-bold">Lookup Hotel</button>
                                     </div>
                                 </div>
                                 <div class="space-y-2 pt-2 border-t border-zinc-800">
                                     <span class="text-xs text-zinc-400 font-semibold block">Platforms to Search:</span>
                                     <div class="flex flex-wrap items-center gap-4 text-xs font-semibold text-zinc-300">
-                                        <label class="flex items-center gap-2"><input type="checkbox" checked class="w-4 h-4 rounded bg-zinc-900 border-zinc-700"> Booking.com</label>
-                                        <label class="flex items-center gap-2"><input type="checkbox" checked class="w-4 h-4 rounded bg-zinc-900 border-zinc-700"> MakeMyTrip</label>
-                                        <label class="flex items-center gap-2"><input type="checkbox" checked class="w-4 h-4 rounded bg-zinc-900 border-zinc-700"> Agoda</label>
-                                        <label class="flex items-center gap-2"><input type="checkbox" checked class="w-4 h-4 rounded bg-zinc-900 border-zinc-700"> Expedia</label>
+                                        <label class="flex items-center gap-2"><input type="checkbox" name="gmf-platforms" value="booking" checked class="w-4 h-4 rounded bg-zinc-900 border-zinc-700"> Booking.com</label>
+                                        <label class="flex items-center gap-2"><input type="checkbox" name="gmf-platforms" value="mmt" checked class="w-4 h-4 rounded bg-zinc-900 border-zinc-700"> MakeMyTrip</label>
+                                        <label class="flex items-center gap-2"><input type="checkbox" name="gmf-platforms" value="agoda" checked class="w-4 h-4 rounded bg-zinc-900 border-zinc-700"> Agoda</label>
+                                        <label class="flex items-center gap-2"><input type="checkbox" name="gmf-platforms" value="expedia" checked class="w-4 h-4 rounded bg-zinc-900 border-zinc-700"> Expedia</label>
                                     </div>
                                 </div>
                             </div>
                             <div class="grid grid-cols-2 gap-3 mt-4">
-                                <button onclick="alert('Running mapping scan...')" class="btn-rose py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider">Find Parallel Listings</button>
-                                <button class="btn-grey bg-[#374151] py-2.5 rounded-lg text-xs font-bold" disabled>Stop</button>
+                                <button id="gmf-single-btn" onclick="runSingleParallelFinder()" class="btn-rose py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider">Find Parallel Listings</button>
+                                <button id="gmf-single-stop-btn" onclick="stopSingleParallelFinder()" class="btn-grey bg-[#374151] py-2.5 rounded-lg text-xs font-bold" disabled>Stop</button>
                             </div>
                         </div>
 
@@ -475,7 +475,7 @@
                                             <th class="py-2 px-3 text-right">Actions</th>
                                         </tr>
                                     </thead>
-                                    <tbody class="divide-y divide-zinc-900 text-zinc-300">
+                                    <tbody id="gmf-candidates-tbody" class="divide-y divide-zinc-900 text-zinc-300">
                                         <tr>
                                             <td colspan="6" class="py-6 text-center text-zinc-650 italic">Candidates list empty. Perform lookup above.</td>
                                         </tr>
@@ -494,20 +494,19 @@
                             
                             <div class="flex flex-wrap items-center justify-between gap-3 mt-3">
                                 <div class="flex gap-2">
-                                    <button class="btn-blue bg-[#1e293b] border border-zinc-700 px-3 py-2 rounded text-xs font-bold">Browse CSV</button>
-                                    <button class="btn-blue bg-[#1e293b] border border-zinc-700 px-3 py-2 rounded text-xs font-bold">Download Sample</button>
+                                    <input type="file" id="gmf-csv-file" accept=".csv" class="hidden" onchange="handleGMFCSV(event)">
+                                    <button onclick="document.getElementById('gmf-csv-file').click()" class="btn-blue bg-[#1e293b] hover:bg-zinc-800 border border-zinc-700 px-3 py-2 rounded text-xs font-bold">Browse CSV</button>
+                                    <button onclick="downloadGMParallelSample()" class="btn-blue bg-[#1e293b] hover:bg-zinc-800 border border-zinc-700 px-3 py-2 rounded text-xs font-bold">Download Sample</button>
                                 </div>
                                 <div class="flex gap-1.5">
-                                    <button onclick="alert('Bulk search started')" class="btn-rose px-4 py-2 rounded text-xs font-bold">Start</button>
-                                    <button class="btn-grey bg-amber-600 px-4 py-2 rounded text-xs font-bold">Pause</button>
-                                    <button class="btn-grey px-4 py-2 rounded text-xs font-bold" disabled>Stop</button>
-                                    <button class="btn-grey px-2.5 py-2 rounded text-xs font-bold flex items-center justify-center"><i class="fa-solid fa-gear"></i>Settings</button>
+                                    <button id="gmf-start-btn" onclick="runGMBulkParallel()" class="btn-rose px-4 py-2 rounded text-xs font-bold">Start</button>
+                                    <button id="gmf-stop-btn" onclick="stopGMBulkParallel()" class="btn-grey px-4 py-2 rounded text-xs font-bold" disabled>Stop</button>
                                 </div>
                             </div>
 
                             <div class="grid grid-cols-2 gap-3 mt-3">
-                                <button class="btn-green py-2 rounded text-xs font-bold" disabled>Download CSV</button>
-                                <button onclick="document.getElementById('gmf-bulk-text').value=''" class="btn-grey bg-[#374151] py-2 rounded text-xs font-bold">Clear</button>
+                                <button id="gmf-download-btn" onclick="downloadGMFBulkCSV()" class="btn-green py-2 rounded text-xs font-bold" disabled>Download CSV</button>
+                                <button onclick="clearGMFBulk()" class="btn-grey bg-[#374151] hover:bg-[#4b5563] py-2 rounded text-xs font-bold">Clear</button>
                             </div>
                         </div>
 
@@ -1373,11 +1372,392 @@
                 addLink('Expedia', `https://www.expedia.com/Hotel-Search?destination=${encodeURIComponent(searchStr)}`);
             }
         }
+        }
 
         function copyGeneratedGMBLinks() {
             if (generatedGMBLinksList.length === 0) return;
             navigator.clipboard.writeText(generatedGMBLinksList.join('\n'));
             alert("All generated links copied to clipboard!");
+        }
+
+        // ── GOD MODE LINK BUILDER (BULK) ──
+        let gmbBulkRows = [];
+        let gmbBulkResults = [];
+        let gmbIsRunning = false;
+
+        function logGMBTerminal(msg, isErr=false) {
+            const term = document.querySelector('#godmode-sub-builder .terminal-box');
+            if (!term) return;
+            const d = document.createElement('div');
+            d.textContent = msg;
+            if (isErr) d.className = 'text-rose-400 font-semibold';
+            term.appendChild(d);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        function downloadGMLinkSample() {
+            const headers = "Hotel Name,City,FHID,URL\n";
+            const row1 = "FabHotel Raj Villa,Indore,1234,http://booking.com/...\n";
+            const row2 = "FabHotel The Corporate,Mumbai,,\n";
+            const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(headers + row1 + row2);
+            const link = document.createElement("a");
+            link.setAttribute("href", csvContent);
+            link.setAttribute("download", "sample_link_builder.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            logGMBTerminal("> Downloaded link builder sample CSV.");
+        }
+
+        function handleGMBCSV(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const text = e.target.result;
+                const rows = parseCSVText(text);
+                gmbBulkRows = rows.map(r => ({
+                    name: r["Hotel Name"] || r.name || r.hotel_name || '',
+                    city: r.City || r.city || '',
+                    hotel_id: r.FHID || r.fhid || r.hotel_id || '',
+                    url: r.URL || r.url || ''
+                }));
+                
+                const lines = gmbBulkRows.map(r => `${r.name}, ${r.city}${r.hotel_id ? ', ' + r.hotel_id : ''}`);
+                document.getElementById('gmb-bulk-text').value = lines.join('\n');
+                logGMBTerminal(`> Loaded CSV: ${file.name} (${gmbBulkRows.length} properties parsed).`);
+            };
+            reader.readAsText(file);
+        }
+
+        function runGMBulkLinkBuilder() {
+            const text = document.getElementById('gmb-bulk-text').value.trim();
+            if (!text) {
+                alert("Please paste data or load a CSV first!");
+                return;
+            }
+
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            gmbBulkResults = [];
+            gmbIsRunning = true;
+
+            document.getElementById('gmb-start-btn').disabled = true;
+            document.getElementById('gmb-stop-btn').disabled = false;
+            document.getElementById('gmb-download-btn').disabled = true;
+
+            const term = document.querySelector('#godmode-sub-builder .terminal-box');
+            term.innerHTML = '<div>> Starting Bulk Link Builder process...</div>';
+
+            let idx = 0;
+            function processNext() {
+                if (!gmbIsRunning) return;
+                if (idx >= lines.length) {
+                    logGMBTerminal(`> Finished! Built links for ${gmbBulkResults.length} properties.`, false);
+                    document.getElementById('gmb-start-btn').disabled = false;
+                    document.getElementById('gmb-stop-btn').disabled = true;
+                    document.getElementById('gmb-download-btn').disabled = false;
+                    return;
+                }
+
+                const line = lines[idx];
+                const parts = line.split(',').map(p => p.trim());
+                const name = parts[0] || 'Unknown';
+                const city = parts[1] || '';
+                const hotel_id = parts[2] || '';
+                const url = parts[3] || '';
+
+                logGMBTerminal(`> Formatting index references for: ${name}...`);
+
+                // Formulate links
+                const query = city ? `${name} ${city}` : name;
+                const queryEncoded = encodeURIComponent(query);
+                
+                const bookingLink = `https://www.booking.com/searchresults.en-gb.html?ss=${queryEncoded}`;
+                const mmtLink = hotel_id ? `https://www.makemytrip.com/hotels/hotel-details/?hotelId=${hotel_id}` : `https://www.makemytrip.com/hotels/?search=${encodeURIComponent(name)}`;
+                const agodaLink = `https://www.agoda.com/search?text=${encodeURIComponent(name)}`;
+                const expediaLink = `https://www.expedia.com/hotels/search?text=${encodeURIComponent(name)}`;
+                const goibiboLink = `https://www.goibibo.com/hotels/find-hotels-in-india/?searchText=${encodeURIComponent(name)}`;
+
+                gmbBulkResults.push({
+                    "Hotel Name": name,
+                    "City": city,
+                    "FHID": hotel_id,
+                    "URL": url,
+                    "Booking Link": bookingLink,
+                    "MMT Link": mmtLink,
+                    "Agoda Link": agodaLink,
+                    "Expedia Link": expediaLink,
+                    "Goibibo Link": goibiboLink
+                });
+
+                idx++;
+                setTimeout(processNext, 150);
+            }
+            processNext();
+        }
+
+        function stopGMBulkLinkBuilder() {
+            gmbIsRunning = false;
+            logGMBTerminal("> Process stopped by user.");
+            document.getElementById('gmb-start-btn').disabled = false;
+            document.getElementById('gmb-stop-btn').disabled = true;
+        }
+
+        function downloadGMBulkCSV() {
+            if (gmbBulkResults.length === 0) return;
+            const headers = ["Hotel Name", "City", "FHID", "URL", "Booking Link", "MMT Link", "Agoda Link", "Expedia Link", "Goibibo Link"];
+            let csvContent = headers.join(",") + "\n";
+            gmbBulkResults.forEach(r => {
+                const row = headers.map(h => `"${(r[h] || '').replace(/"/g, '""')}"`);
+                csvContent += row.join(",") + "\n";
+            });
+            const link = document.createElement("a");
+            link.setAttribute("href", "data:text/csv;charset=utf-8," + encodeURIComponent(csvContent));
+            link.setAttribute("download", "bulk_built_links.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        function clearGMBBulk() {
+            document.getElementById('gmb-bulk-text').value = '';
+            gmbBulkResults = [];
+            document.querySelector('#godmode-sub-builder .terminal-box').innerHTML = '<div>> Idle. Ready to batch generate search indexes...</div>';
+            document.getElementById('gmb-download-btn').disabled = true;
+        }
+
+        // ── GOD MODE PARALLEL FINDER (BULK) ──
+        let gmfBulkRows = [];
+        let gmfActiveSessionId = null;
+        let gmfActiveInterval = null;
+
+        function logGMFTerminal(msg, isErr=false) {
+            const term = document.querySelector('#godmode-sub-finder .terminal-box');
+            if (!term) return;
+            const d = document.createElement('div');
+            d.textContent = msg;
+            if (isErr) d.className = 'text-rose-400 font-semibold';
+            term.appendChild(d);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        function downloadGMParallelSample() {
+            const headers = "Hotel Name,City\n";
+            const row1 = "FabHotel Raj Villa,Indore\n";
+            const row2 = "FabHotel The Corporate,Mumbai\n";
+            const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(headers + row1 + row2);
+            const link = document.createElement("a");
+            link.setAttribute("href", csvContent);
+            link.setAttribute("download", "sample_parallel_finder.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            logGMFTerminal("> Downloaded parallel finder sample CSV.");
+        }
+
+        function handleGMFCSV(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const text = e.target.result;
+                const rows = parseCSVText(text);
+                gmfBulkRows = rows.map(r => ({
+                    name: r["Hotel Name"] || r.name || r.hotel_name || '',
+                    city: r.City || r.city || ''
+                }));
+                const lines = gmfBulkRows.map(r => `${r.name}, ${r.city}`);
+                document.getElementById('gmf-bulk-text').value = lines.join('\n');
+                logGMFTerminal(`> Loaded CSV: ${file.name} (${gmfBulkRows.length} properties parsed).`);
+            };
+            reader.readAsText(file);
+        }
+
+        async function runGMBulkParallel() {
+            const text = document.getElementById('gmf-bulk-text').value.trim();
+            if (!text) {
+                alert("Please paste data or load a CSV first!");
+                return;
+            }
+
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            const items = lines.map(line => {
+                const parts = line.split(',');
+                return { name: parts[0] || '', city: parts[1] || '' };
+            });
+
+            document.getElementById('gmf-start-btn').disabled = true;
+            document.getElementById('gmf-stop-btn').disabled = false;
+            document.getElementById('gmf-download-btn').disabled = true;
+
+            logGMFTerminal(`> Dispatching parallel worker task to local engine...`);
+
+            try {
+                const res = await fetch('/api/godmode/bulk_parallel/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ items: items, platforms: ['booking', 'mmt', 'agoda', 'expedia'] })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    gmfActiveSessionId = data.session_id;
+                    gmfActiveInterval = setInterval(pollGMFStatus, 1500);
+                } else {
+                    logGMFTerminal(`> Error starting job: ${data.error}`, true);
+                    document.getElementById('gmf-start-btn').disabled = false;
+                    document.getElementById('gmf-stop-btn').disabled = true;
+                }
+            } catch (e) {
+                logGMFTerminal(`> Connection error: ${e.message}`, true);
+                document.getElementById('gmf-start-btn').disabled = false;
+                document.getElementById('gmf-stop-btn').disabled = true;
+            }
+        }
+
+        async function pollGMFStatus() {
+            if (!gmfActiveSessionId) return;
+            try {
+                const res = await fetch(`/api/godmode/bulk_parallel/status/${gmfActiveSessionId}`);
+                const data = await res.json();
+                if (res.ok) {
+                    const term = document.querySelector('#godmode-sub-finder .terminal-box');
+                    term.innerHTML = '';
+                    data.logs.forEach(l => {
+                        const d = document.createElement('div');
+                        d.textContent = l;
+                        if (l.includes('Error') || l.includes('🛑')) d.className = 'text-rose-400';
+                        else if (l.includes('✅')) d.className = 'text-emerald-400 font-bold';
+                        term.appendChild(d);
+                    });
+                    term.scrollTop = term.scrollHeight;
+
+                    if (data.finished) {
+                        clearInterval(gmfActiveInterval);
+                        logGMFTerminal("> Bulk parallel search finished!", false);
+                        document.getElementById('gmf-start-btn').disabled = false;
+                        document.getElementById('gmf-stop-btn').disabled = true;
+                        document.getElementById('gmf-download-btn').disabled = false;
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function stopGMBulkParallel() {
+            if (!gmfActiveSessionId) return;
+            try {
+                await fetch(`/api/godmode/bulk_parallel/stop/${gmfActiveSessionId}`, { method: 'POST' });
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function downloadGMFBulkCSV() {
+            if (!gmfActiveSessionId) return;
+            window.location.href = `/api/godmode/bulk_parallel/download/${gmfActiveSessionId}`;
+        }
+
+        function clearGMFBulk() {
+            document.getElementById('gmf-bulk-text').value = '';
+            document.querySelector('#godmode-sub-finder .terminal-box').innerHTML = '<div>> Idle. Ready to batch resolve mapping links...</div>';
+            document.getElementById('gmf-download-btn').disabled = true;
+        }
+
+        // ── GOD MODE PARALLEL FINDER (SINGLE SEARCH) ──
+        async function runSingleParallelFinder() {
+            const name = document.getElementById('gmf-name').value.trim();
+            const city = document.getElementById('gmf-city').value.trim();
+            if (!name) {
+                alert("Please enter a hotel name first!");
+                return;
+            }
+
+            const checkedPlatforms = Array.from(document.querySelectorAll('input[name="gmf-platforms"]:checked')).map(cb => cb.value);
+            if (checkedPlatforms.length === 0) {
+                alert("Please select at least one platform to search!");
+                return;
+            }
+
+            const tbody = document.getElementById('gmf-candidates-tbody');
+            tbody.innerHTML = '<tr><td colspan="6" class="py-6 text-center text-zinc-400 font-semibold"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i>Searching platforms in headless browser context...</td></tr>';
+            
+            document.getElementById('gmf-single-btn').disabled = true;
+            document.getElementById('gmf-single-stop-btn').disabled = false;
+
+            try {
+                const res = await fetch('/api/godmode/parallel_finder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name, city: city, platforms: checkedPlatforms })
+                });
+                const data = await res.json();
+                
+                document.getElementById('gmf-single-btn').disabled = false;
+                document.getElementById('gmf-single-stop-btn').disabled = true;
+
+                if (res.ok) {
+                    tbody.innerHTML = '';
+                    const list = data.candidates || [];
+                    if (list.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="6" class="py-6 text-center text-zinc-550 italic">No duplicate listing candidates found.</td></tr>';
+                        return;
+                    }
+                    list.forEach(c => {
+                        const tr = document.createElement('tr');
+                        tr.className = 'border-b border-zinc-900 hover:bg-zinc-800/10 transition';
+                        tr.innerHTML = `
+                            <td class="py-2.5 px-3 font-semibold text-white">${c.name}</td>
+                            <td class="py-2.5 px-3 text-zinc-400 font-bold uppercase">${c.platform}</td>
+                            <td class="py-2.5 px-3 text-zinc-300 max-w-xs truncate">${c.location}</td>
+                            <td class="py-2.5 px-3 text-emerald-400 font-bold">${c.similarity}%</td>
+                            <td class="py-2.5 px-3 text-zinc-500">${c.photo_match}</td>
+                            <td class="py-2.5 px-3 text-right">
+                                <a href="${c.url}" target="_blank" class="text-cyan-400 hover:underline font-bold">View Link</a>
+                            </td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="6" class="py-6 text-center text-rose-400 font-semibold">Search failed: ${data.error}</td></tr>`;
+                }
+            } catch (e) {
+                document.getElementById('gmf-single-btn').disabled = false;
+                document.getElementById('gmf-single-stop-btn').disabled = true;
+                tbody.innerHTML = `<tr><td colspan="6" class="py-6 text-center text-rose-400 font-semibold">Connection failed: ${e.message}</td></tr>`;
+            }
+        }
+
+        function stopSingleParallelFinder() {
+            document.getElementById('gmf-single-btn').disabled = false;
+            document.getElementById('gmf-single-stop-btn').disabled = true;
+            document.getElementById('gmf-candidates-tbody').innerHTML = '<tr><td colspan="6" class="py-6 text-center text-zinc-650 italic">Search cancelled.</td></tr>';
+        }
+
+        async function lookupCoordinates() {
+            const name = document.getElementById('gmf-name').value.trim();
+            const city = document.getElementById('gmf-city').value.trim();
+            if (!city) {
+                alert("Please enter a City first!");
+                return;
+            }
+            try {
+                const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(name + ' ' + city)}`);
+                const data = await res.json();
+                if (data && data.length > 0) {
+                    document.getElementById('gmf-latlong').value = `${parseFloat(data[0].lat).toFixed(4)}, ${parseFloat(data[0].lon).toFixed(4)}`;
+                } else {
+                    const resCity = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(city)}`);
+                    const dataCity = await resCity.json();
+                    if (dataCity && dataCity.length > 0) {
+                        document.getElementById('gmf-latlong').value = `${parseFloat(dataCity[0].lat).toFixed(4)}, ${parseFloat(dataCity[0].lon).toFixed(4)}`;
+                    } else {
+                        alert("Coordinates not found. Please enter manually.");
+                    }
+                }
+            } catch (e) {
+                alert("Lookup failed. Please enter coordinates manually.");
+            }
         }
 
 

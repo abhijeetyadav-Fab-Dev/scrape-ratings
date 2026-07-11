@@ -25,6 +25,7 @@ active_jobs = {} # session_id -> WebScrapeWorker
 active_ratings_jobs = {} # session_id -> WebRatingsWorker
 active_async_jobs = {} # session_id -> WebAsyncScraperWorker
 active_ocm_jobs = {} # session_id -> WebOCMWorker
+active_bulk_parallel_jobs = {} # session_id -> WebBulkParallelFinderWorker
 
 class WebScrapeWorker(threading.Thread):
     def __init__(self, job, session_id):
@@ -876,6 +877,184 @@ class WebOCMWorker(threading.Thread):
         self.finished_state = True
 
 
+class WebBulkParallelFinderWorker(threading.Thread):
+    def __init__(self, items, platforms, session_id):
+        super().__init__()
+        self.items = items
+        self.platforms = platforms
+        self.session_id = session_id
+        self._stop = False
+        self.logs = []
+        self.progress_val = 0
+        self.progress_max = len(items)
+        self.progress_status = "Waiting..."
+        self.finished_state = False
+        self.output_path = ""
+
+    def log(self, msg):
+        self.logs.append(msg)
+        print(f"[BulkParallel][{self.session_id}] {msg}")
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        self.log("🚀 Starting Bulk Parallel Listing Finder Web Worker...")
+        self.progress_status = "Initializing..."
+        
+        import csv
+        import urllib.parse
+        import difflib
+        import time
+        from god_mode import clean_hotel_name
+        from playwright.sync_api import sync_playwright
+        
+        total = len(self.items)
+        results = []
+        self.output_path = str(Path.home() / "Downloads" / f"bulk_parallel_results_{int(time.time())}.csv")
+        
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800}
+                )
+                context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
+                
+                for idx, item in enumerate(self.items):
+                    if self._stop:
+                        self.log("🛑 Scraping stopped by user.")
+                        break
+                        
+                    name = item.get('name', '').strip()
+                    city = item.get('city', '').strip()
+                    self.progress_val = idx + 1
+                    self.progress_status = f"Searching for: {name}..."
+                    self.log(f"🔍 Searching for: {name} in {city}...")
+                    
+                    cleaned_target = clean_hotel_name(name)
+                    if city.lower() in cleaned_target.lower():
+                        query = cleaned_target
+                    else:
+                        query = f"{cleaned_target} {city}".strip()
+                    query_encoded = urllib.parse.quote_plus(query)
+                    
+                    row_res = {"Hotel Name": name, "City": city}
+                    
+                    for platform in self.platforms:
+                        try:
+                            page = context.new_page()
+                            cards = []
+                            if platform == 'booking':
+                                search_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
+                                page.goto(search_url, timeout=15000, wait_until="domcontentloaded")
+                                page.wait_for_timeout(1000)
+                                cards = page.query_selector_all('[data-testid="property-card"], [data-testid="sr-property-card-common"]')[:2]
+                            elif platform == 'agoda':
+                                search_url = f"https://www.agoda.com/en-gb/search?text={query_encoded}"
+                                page.goto(search_url, timeout=15000, wait_until="domcontentloaded")
+                                page.wait_for_timeout(1000)
+                                cards = page.query_selector_all('li[data-selenium="property-item"], [data-selenium="hotel-item"], .PropertyCard, a[href*="/hotel/"]')[:2]
+                            elif platform == 'expedia':
+                                search_url = f"https://www.expedia.com/Hotel-Search?destination={query_encoded}"
+                                page.goto(search_url, timeout=15000, wait_until="domcontentloaded")
+                                page.wait_for_timeout(1000)
+                                cards = page.query_selector_all('[data-stid="property-card"], .uitk-card')[:2]
+                            elif platform == 'mmt':
+                                search_url = f"https://www.makemytrip.com/hotels/hotel-listing/?searchText={query_encoded}"
+                                page.goto(search_url, timeout=15000, wait_until="domcontentloaded")
+                                page.wait_for_timeout(1000)
+                                cards = page.query_selector_all('.infinite-scroll-component > div, [class*="ListingCard"]')[:2]
+                                
+                            best_match_url = ""
+                            best_match_name = ""
+                            best_sim = -1
+                            
+                            for card in cards:
+                                try:
+                                    c_name, c_url = "", ""
+                                    if platform == 'booking':
+                                        name_el = card.query_selector('[data-testid="title"], h3, .sr-hotel__name')
+                                        c_name = name_el.inner_text().strip() if name_el else ''
+                                        link_el = card.query_selector('a[data-testid="title-link"], a[href*="/hotel/"]')
+                                        c_url = link_el.get_attribute('href') if link_el else ''
+                                        if c_url and c_url.startswith('/'):
+                                            c_url = "https://www.booking.com" + c_url
+                                    elif platform == 'agoda':
+                                        name_el = card.query_selector('[data-selenium="hotel-name"], h3, .property-card-title')
+                                        c_name = name_el.inner_text().strip() if name_el else ''
+                                        link_el = card.query_selector('a[href*="/hotel/"], a')
+                                        c_url = link_el.get_attribute('href') if link_el else ''
+                                        if c_url and c_url.startswith('/'):
+                                            c_url = "https://www.agoda.com" + c_url
+                                    elif platform == 'expedia':
+                                        name_el = card.query_selector('h3, h4')
+                                        c_name = name_el.inner_text().strip() if name_el else ''
+                                        link_el = card.query_selector('a')
+                                        c_url = link_el.get_attribute('href') if link_el else ''
+                                        if c_url and c_url.startswith('/'):
+                                            c_url = "https://www.expedia.com" + c_url
+                                    elif platform == 'mmt':
+                                        name_el = card.query_selector('p[class*="hotelName"], h3, span[class*="hotelName"]')
+                                        c_name = name_el.inner_text().strip() if name_el else ''
+                                        link_el = card.query_selector('a')
+                                        c_url = link_el.get_attribute('href') if link_el else ''
+                                        if c_url and c_url.startswith('/'):
+                                            c_url = "https://www.makemytrip.com" + c_url
+                                            
+                                    if c_url:
+                                        c_url = c_url.split('?')[0]
+                                    if not c_name:
+                                        continue
+                                        
+                                    c_name = clean_hotel_name(c_name)
+                                    ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), c_name.lower()).ratio()
+                                    sim = int(ratio * 100)
+                                    if sim > best_sim:
+                                        best_sim = sim
+                                        best_match_url = c_url
+                                        best_match_name = c_name
+                                except Exception:
+                                    pass
+                                    
+                            if best_match_url:
+                                row_res[f"{platform.capitalize()} Match"] = best_match_name
+                                row_res[f"{platform.capitalize()} URL"] = best_match_url
+                                row_res[f"{platform.capitalize()} Similarity"] = f"{best_sim}%"
+                                self.log(f"  [{platform.upper()}] Match: {best_match_name} ({best_sim}% similarity)")
+                            else:
+                                row_res[f"{platform.capitalize()} Match"] = "No Match"
+                                row_res[f"{platform.capitalize()} URL"] = ""
+                                row_res[f"{platform.capitalize()} Similarity"] = "0%"
+                            page.close()
+                        except Exception as e:
+                            self.log(f"  [{platform.upper()}] Error: {e}")
+                            
+                    results.append(row_res)
+                    
+                browser.close()
+                
+            if results:
+                headers = list(results[0].keys())
+                with open(self.output_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=headers)
+                    writer.writeheader()
+                    writer.writerows(results)
+                self.log(f"✅ Generated bulk results CSV saved to: {self.output_path}")
+            else:
+                self.log("⚠️ No results gathered to save.")
+                
+        except Exception as e:
+            self.log(f"❌ Playwright execution error: {e}")
+            self.progress_status = f"Error: {e}"
+            self.finished_state = True
+            return
+            
+        self.progress_status = "Finished"
+        self.finished_state = True
+
+
 # ── Ratings Scraper Routes ────────────────────────────────
 @app.route("/api/ratings/start", methods=["POST"])
 def ratings_start():
@@ -941,6 +1120,183 @@ def godmode_scan():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/godmode/parallel_finder", methods=["POST"])
+def godmode_parallel_finder():
+    data = request.json or {}
+    name = data.get("name")
+    city = data.get("city", "")
+    platforms = data.get("platforms", ["booking", "mmt", "agoda", "expedia"])
+    if not name:
+        return jsonify({"error": "Missing hotel name"}), 400
+        
+    # Run the playwright search logic synchronously for single query
+    from god_mode import clean_hotel_name
+    import difflib
+    import urllib.parse
+    from playwright.sync_api import sync_playwright
+    
+    cleaned_target = clean_hotel_name(name)
+    if city.lower() in cleaned_target.lower():
+        query = cleaned_target
+    else:
+        query = f"{cleaned_target} {city}".strip()
+    query_encoded = urllib.parse.quote_plus(query)
+    
+    candidates = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
+            # Abort image/font loads to speed up search
+            context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
+            
+            for platform in platforms:
+                try:
+                    page = context.new_page()
+                    cards = []
+                    if platform == 'booking':
+                        search_url = f"https://www.booking.com/searchresults.html?ss={query_encoded}"
+                        page.goto(search_url, timeout=15000, wait_until="domcontentloaded")
+                        page.wait_for_timeout(1000)
+                        cards = page.query_selector_all('[data-testid="property-card"], [data-testid="sr-property-card-common"]')[:3]
+                    elif platform == 'agoda':
+                        search_url = f"https://www.agoda.com/en-gb/search?text={query_encoded}"
+                        page.goto(search_url, timeout=15000, wait_until="domcontentloaded")
+                        page.wait_for_timeout(1000)
+                        cards = page.query_selector_all('li[data-selenium="property-item"], [data-selenium="hotel-item"], .PropertyCard, a[href*="/hotel/"]')[:3]
+                    elif platform == 'expedia':
+                        search_url = f"https://www.expedia.com/Hotel-Search?destination={query_encoded}"
+                        page.goto(search_url, timeout=15000, wait_until="domcontentloaded")
+                        page.wait_for_timeout(1000)
+                        cards = page.query_selector_all('[data-stid="property-card"], .uitk-card')[:3]
+                    elif platform == 'mmt':
+                        search_url = f"https://www.makemytrip.com/hotels/hotel-listing/?searchText={query_encoded}"
+                        page.goto(search_url, timeout=15000, wait_until="domcontentloaded")
+                        page.wait_for_timeout(1000)
+                        cards = page.query_selector_all('.infinite-scroll-component > div, [class*="ListingCard"]')[:3]
+                        
+                    for card in cards:
+                        try:
+                            c_name, c_location, c_url = "", "", ""
+                            if platform == 'booking':
+                                name_el = card.query_selector('[data-testid="title"], h3, .sr-hotel__name')
+                                c_name = name_el.inner_text().strip() if name_el else ''
+                                loc_el = card.query_selector('[data-testid="address"], [data-testid="location"]')
+                                c_location = loc_el.inner_text().strip() if loc_el else ''
+                                link_el = card.query_selector('a[data-testid="title-link"], a[href*="/hotel/"]')
+                                c_url = link_el.get_attribute('href') if link_el else ''
+                                if c_url and c_url.startswith('/'):
+                                    c_url = "https://www.booking.com" + c_url
+                            elif platform == 'agoda':
+                                name_el = card.query_selector('[data-selenium="hotel-name"], h3, .property-card-title')
+                                c_name = name_el.inner_text().strip() if name_el else ''
+                                loc_el = card.query_selector('[data-selenium="area-city-name"], .property-card-location')
+                                c_location = loc_el.inner_text().strip() if loc_el else ''
+                                link_el = card.query_selector('a[href*="/hotel/"], a')
+                                c_url = link_el.get_attribute('href') if link_el else ''
+                                if c_url and c_url.startswith('/'):
+                                    c_url = "https://www.agoda.com" + c_url
+                            elif platform == 'expedia':
+                                name_el = card.query_selector('h3, h4')
+                                c_name = name_el.inner_text().strip() if name_el else ''
+                                loc_el = card.query_selector('[data-test-id="neighborhood"]')
+                                c_location = loc_el.inner_text().strip() if loc_el else ''
+                                link_el = card.query_selector('a')
+                                c_url = link_el.get_attribute('href') if link_el else ''
+                                if c_url and c_url.startswith('/'):
+                                    c_url = "https://www.expedia.com" + c_url
+                            elif platform == 'mmt':
+                                name_el = card.query_selector('p[class*="hotelName"], h3, span[class*="hotelName"]')
+                                c_name = name_el.inner_text().strip() if name_el else ''
+                                loc_el = card.query_selector('span[class*="location"]')
+                                c_location = loc_el.inner_text().strip() if loc_el else ''
+                                link_el = card.query_selector('a')
+                                c_url = link_el.get_attribute('href') if link_el else ''
+                                if c_url and c_url.startswith('/'):
+                                    c_url = "https://www.makemytrip.com" + c_url
+                                    
+                            if c_url:
+                                c_url = c_url.split('?')[0]
+                            if not c_name:
+                                continue
+                                
+                            c_name = clean_hotel_name(c_name)
+                            ratio = difflib.SequenceMatcher(None, cleaned_target.lower(), c_name.lower()).ratio()
+                            similarity = int(ratio * 100)
+                            
+                            candidates.append({
+                                "name": c_name,
+                                "platform": platform,
+                                "location": c_location or "N/A",
+                                "similarity": similarity,
+                                "url": c_url,
+                                "photo_match": "N/A"
+                            })
+                        except Exception:
+                            pass
+                    page.close()
+                except Exception:
+                    pass
+            browser.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
+    candidates.sort(key=lambda x: x['similarity'], reverse=True)
+    return jsonify({"candidates": candidates})
+
+@app.route("/api/godmode/bulk_parallel/start", methods=["POST"])
+def godmode_bulk_parallel_start():
+    data = request.json or {}
+    items = data.get("items", [])
+    platforms = data.get("platforms", ["booking", "mmt", "agoda", "expedia"])
+    if not items:
+        return jsonify({"error": "No items provided"}), 400
+        
+    session_id = f"bulk_parallel_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    worker = WebBulkParallelFinderWorker(items, platforms, session_id)
+    active_bulk_parallel_jobs[session_id] = worker
+    worker.start()
+    
+    return jsonify({
+        "session_id": session_id,
+        "status": "started",
+        "message": f"Bulk parallel listing search started for {len(items)} hotels"
+    })
+
+@app.route("/api/godmode/bulk_parallel/status/<session_id>")
+def godmode_bulk_parallel_status(session_id):
+    worker = active_bulk_parallel_jobs.get(session_id)
+    if not worker:
+        return jsonify({"error": "Session not found"}), 404
+        
+    return jsonify({
+        "session_id": session_id,
+        "finished": worker.finished_state,
+        "status_text": worker.progress_status,
+        "progress_val": worker.progress_val,
+        "progress_max": worker.progress_max,
+        "logs": worker.logs
+    })
+
+@app.route("/api/godmode/bulk_parallel/stop/<session_id>", methods=["POST"])
+def godmode_bulk_parallel_stop(session_id):
+    worker = active_bulk_parallel_jobs.get(session_id)
+    if worker:
+        worker.stop()
+        return jsonify({"message": "Stop request sent to bulk parallel worker"})
+    return jsonify({"error": "Active session not found"}), 404
+
+@app.route("/api/godmode/bulk_parallel/download/<session_id>")
+def godmode_bulk_parallel_download(session_id):
+    worker = active_bulk_parallel_jobs.get(session_id)
+    if worker and worker.output_path and os.path.exists(worker.output_path):
+        return send_file(worker.output_path, as_attachment=True)
+    return jsonify({"error": "File not found"}), 404
+
 
 
 # ── Async Scraper Routes ─────────────────────────────────

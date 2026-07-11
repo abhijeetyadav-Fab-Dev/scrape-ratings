@@ -104,7 +104,7 @@ echo.
 "!PYTHON_EXE!" -m pip install -r "%~dp0requirements.txt" --quiet --no-warn-script-location
 if !errorlevel! neq 0 (
     echo  [!] Retry installing without version pins...
-    "!PYTHON_EXE!" -m pip install PyQt6 playwright httpx pandas beautifulsoup4 lxml aiofiles openpyxl --quiet --no-warn-script-location
+    "!PYTHON_EXE!" -m pip install PyQt6 playwright httpx pandas beautifulsoup4 lxml aiofiles openpyxl curl_cffi --quiet --no-warn-script-location
 )
 echo  [OK] Python dependencies installed!
 
