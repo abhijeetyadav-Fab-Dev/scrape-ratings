@@ -952,7 +952,7 @@ class BulkParallelFinderWorker(QThread):
                     is_cdp_bulk = False
                 if not is_cdp_bulk:
                     context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("font", "media") else route.continue_())
-                page = context.new_page()
+                page = None
             except Exception as e:
                 self.progress.emit(0, total, f"Failed to launch browser: {e}")
                 self.finished.emit([], "")
@@ -1013,6 +1013,7 @@ class BulkParallelFinderWorker(QThread):
                         break
 
                     try:
+                        page = context.new_page()
                         if platform == 'booking':
                             # Restrict to India: add ss=<city> + cc=in so Booking only returns Indian properties
                             city_encoded = urllib.parse.quote_plus(city) if city else ''
@@ -1286,6 +1287,12 @@ class BulkParallelFinderWorker(QThread):
 
                     except Exception as e:
                         self.progress.emit(idx + 1, total, f"⚠️ Error on {platform}: {e}")
+                    finally:
+                        if page:
+                            try:
+                                page.close()
+                            except Exception:
+                                pass
 
                 if not found_match:
                     res = list(row_data)
@@ -3593,6 +3600,9 @@ class GodModeTab(QWidget):
                 self.bulk_parallel_worker.resume()
                 self.bulk_parallel_pause_btn.setText("Pause")
                 self.bulk_parallel_log.append("Resumed worker...")
+                return
+            else:
+                QMessageBox.warning(self, "Worker Running", "The bulk parallel finder is already running.")
                 return
 
         self.bulk_parallel_start_btn.setEnabled(False)
